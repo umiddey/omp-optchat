@@ -17,9 +17,12 @@ export default function optchat(pi: ExtensionAPI) {
   let memory: Memory | undefined, release: (() => Promise<void>) | undefined;
   let fault: string | undefined;
   let run: AgentMessage[] = [], logged = 0, running = false;
+  /** The run's first message as OMP holds it (asUser turns shown custom messages into user ones for the log). */
+  let runFirst: AgentMessage | undefined;
   let view: string | undefined, memories = '', lastStart: AgentMessage | undefined;
   let controller = new AbortController(), sequence = 0;
-  const selected = () => pi.getFlag('optchat') || process.env.OMP_OPTCHAT;
+  // OMP marks shells it spawns with OMPCODE=1: an omp started from one inherits OMP_OPTCHAT but must not take the profile.
+  const selected = () => pi.getFlag('optchat') || (process.env.OMPCODE === '1' ? undefined : process.env.OMP_OPTCHAT);
   const active = (ctx: ExtensionContext) => ctx.agent.kind === 'main' && !!selected();
   const required = () => {
     if (fault) throw new Error(fault);
@@ -65,13 +68,14 @@ export default function optchat(pi: ExtensionAPI) {
   pi.on('agent_start', (_event, ctx) => {
     if (!active(ctx)) return;
     controller.abort(); controller = new AbortController();
-    run = []; logged = 0; view = undefined; running = true;
+    run = []; runFirst = undefined; logged = 0; view = undefined; running = true;
   });
   pi.on('message_end', async (event, ctx) => {
     if (!active(ctx) || !running) return;
     try {
       const message = asUser(boundedMessage(event.message));
       if (message.role === 'user' || (message.role === 'toolResult' && message.toolName !== 'zoom')) await saveImages(required().store, message.content);
+      runFirst ??= event.message;
       run.push(message);
       if (view !== undefined) flush();
     } catch (error) { fail(error, ctx); }
@@ -86,7 +90,7 @@ export default function optchat(pi: ExtensionAPI) {
         try { await m.settle(controller.signal); } finally { unsubscribe(); ctx.ui.setWorkingMessage(); }
         view = m.render(); flush();
       }
-      const first = running ? run[0] : lastStart;
+      const first = running ? runFirst : lastStart;
       const at = turnStart(event.messages, first);
       if (running) lastStart = event.messages[at];
       return { messages: projectContext(event.messages, at, running ? view! : m.render(), memories) };

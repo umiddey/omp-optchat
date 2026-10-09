@@ -17,18 +17,17 @@ export function turnStart(messages: AgentMessage[], first?: AgentMessage) {
   if (at < 0) throw new Error('OptChat has no turn start; refusing historical context.');
   return at;
 }
+/** The view (and moved recall) always opens the current turn, so its bytes sit right after the stable notices on
+ * every request of the run. A run started by a shown custom message (async result, report) gets its own view message. */
 export function projectContext(messages: AgentMessage[], at: number, view: string, memories: string, active = true, kind = 'main') {
   if (!enabled(active, kind)) return messages;
   const notices = messages.slice(0, at).filter(m => m.role === 'custom' && NOTICES.has(m.customType));
-  let injected = false;
-  const current = messages.slice(at).map(message => {
-    if (message.role !== 'user' || injected) return message;
-    injected = true;
-    return { ...message, content: [{ type: 'text' as const, text: view }, ...(memories ? [{ type: 'text' as const, text: memories }] : []),
-      ...(typeof message.content === 'string' ? [{ type: 'text' as const, text: message.content }] : message.content)] };
-  });
-  if (!injected) throw new Error('OptChat has no current user message.');
-  return [...notices, ...current];
+  const [first, ...rest] = messages.slice(at);
+  if (!first) throw new Error('OptChat has no current message.');
+  const head = [{ type: 'text' as const, text: view }, ...(memories ? [{ type: 'text' as const, text: memories }] : [])];
+  if (first.role === 'user')
+    return [...notices, { ...first, content: [...head, ...(typeof first.content === 'string' ? [{ type: 'text' as const, text: first.content }] : first.content)] }, ...rest];
+  return [...notices, { role: 'user' as const, content: head, timestamp: first.timestamp }, first, ...rest];
 }
 export function providerPayload(payload: unknown, active: boolean, kind: string, api: string | undefined) {
   return enabled(active, kind) && api === 'anthropic-messages' ? cachePayload(payload) : payload;

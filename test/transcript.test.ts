@@ -43,3 +43,16 @@ test('side turn projection retains only last run onward; missing boundary refuse
   assert.ok(!JSON.stringify(projected).includes('OLD FULL HISTORY')); assert.ok(JSON.stringify(projected).includes('side question'));
   assert.throws(() => turnStart(messages, { ...last, timestamp: 99 }), /refusing historical context/);
 });
+test('a run started by a shown custom message keeps the view first and its own messages', () => {
+  const old = { role: 'user' as const, content: 'OLD FULL HISTORY', timestamp: 0 };
+  const report = { role: 'custom' as const, customType: 'async-result', content: 'job done', display: true, timestamp: 5 };
+  const steer = { role: 'user' as const, content: 'and then?', timestamp: 6 };
+  const messages = [old, report, steer];
+  const projected = projectContext(messages, turnStart(messages, report), '<chat>\nsummary\n</chat>', '<memories>m</memories>');
+  assert.equal(projected.length, 3);
+  const head = projected[0];
+  assert.ok(head.role === 'user');
+  assert.deepEqual(head.content, [{ type: 'text', text: '<chat>\nsummary\n</chat>' }, { type: 'text', text: '<memories>m</memories>' }]);
+  assert.equal(projected[1], report); assert.equal(projected[2], steer);
+  assert.ok(!JSON.stringify(projected).includes('OLD FULL HISTORY'));
+});
