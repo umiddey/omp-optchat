@@ -13,8 +13,10 @@ stored the first request).
 ## Install
 
 ```sh
-omp plugin install github:umiddey/omp-optchat
+omp plugin install omp-optchat
 ```
+
+Or straight from GitHub: `omp plugin install github:umiddey/omp-optchat`.
 
 Update: `omp plugin upgrade omp-optchat`. Remove: `omp plugin uninstall omp-optchat`.
 
