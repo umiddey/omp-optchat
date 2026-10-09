@@ -1,26 +1,25 @@
 import { createHash } from 'node:crypto';
 import type { ImageContent } from '@oh-my-pi/pi-ai';
+import { resizeImage } from '@oh-my-pi/pi-coding-agent/utils/image-resize';
 import { isMime, type Store } from './store.ts';
 
-/** Kept images fit 2048 px on the long side and ~1.5 MB (2 MB as base64), re-encoded as JPEG 85 only when they don't already. */
-export const IMAGE_LIMITS = { maxWidth: 2048, maxHeight: 2048, maxBytes: 2 * 1024 * 1024, jpegQuality: 85 };
-
+const IMAGE_LIMITS = { maxWidth: 2048, maxHeight: 2048, maxBytes: 2 * 1024 * 1024, jpegQuality: 85, minDimension: 1 };
 const hash = (image: ImageContent) => createHash('sha256').update(image.data).digest('hex').slice(0, 16);
-/** How a message's image reads in memory: named by the image as the message holds it, before any shrinking, so it always gets the same name. */
+/** Stable content-addressed reference to the original image bytes. */
 export const imageRef = (image: ImageContent) => `[image ${hash(image)}]`;
 const REF = /\[image ([0-9a-f]{16})\]/g;
 
 export const isImage = (part: unknown): part is ImageContent => typeof part === 'object' && part !== null
   && 'type' in part && part.type === 'image' && 'data' in part && typeof part.data === 'string' && 'mimeType' in part && typeof part.mimeType === 'string';
 
-/** Keeps each image of a message's content in the store, once per distinct image, shrunk to IMAGE_LIMITS. */
+/** Keeps each image once, using OMP's resizer with the upstream image limits. */
 export async function saveImages(store: Store, content: unknown) {
   if (!Array.isArray(content)) return;
   for (const image of content.filter(isImage)) {
     const name = hash(image);
     if (await store.image(name)) continue;
-    const kept = image;
-    if (isMime(kept.mimeType)) await store.putImage(name, kept.mimeType, Buffer.from(kept.data, 'base64'));
+    const kept = await resizeImage(image, IMAGE_LIMITS);
+    if (isMime(kept.mimeType)) await store.putImage(name, kept.mimeType, kept.buffer);
   }
 }
 

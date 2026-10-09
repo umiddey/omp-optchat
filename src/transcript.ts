@@ -20,7 +20,8 @@ export function asUser(message: AgentMessage): AgentMessage {
   if (first?.type === 'text') return { role: 'user', content: [{ ...first, text: tag + first.text }, ...rest], timestamp };
   return { role: 'user', content: [{ type: 'text', text: tag.trimEnd() }, ...content], timestamp };
 }
-export function logMessage(memory: Memory, message: AgentMessage, ) {
+export function logMessage(memory: Memory, original: AgentMessage) {
+  const message = asUser(original);
   const date = new Date(message.timestamp).toISOString();
   if (message.role === 'user') memory.append('user', textContent(message.content), date);
   else if (message.role === 'assistant') {

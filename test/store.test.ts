@@ -82,7 +82,7 @@ function behind() {
 
 test('a store that writes behind gets its writes one at a time, in the order Memory made them', async () => {
   const { store, landed } = behind();
-  const memory = new Memory({ directory: temp(), store, saved: await store.load() }, async () => 'unused', () => {});
+  const memory = new Memory({ directory: 'in-memory-test', store, saved: await store.load() }, async () => 'unused', () => {});
   for (const text of ['one', 'two', 'three']) memory.append('user', text);
   assert.equal(landed.length, 0, 'appends return before their writes land');
   await memory.settle(undefined, 'tree'); await memory.close();
@@ -94,7 +94,7 @@ test('once a write-behind append fails, nothing more is written, summary nodes i
   const { store, landed, failing } = behind(), warnings: string[] = [];
   let release = () => {};
   const gate = new Promise<void>(resolve => { release = resolve; });
-  const memory = new Memory({ directory: temp(), store, saved: await store.load() }, async () => { await gate; return 'summary'; }, text => warnings.push(text));
+  const memory = new Memory({ directory: 'in-memory-test', store, saved: await store.load() }, async () => { await gate; return 'summary'; }, text => warnings.push(text));
   const wait = (ms: number) => new Promise(resolve => setTimeout(resolve, ms));
   await wait(30); landed.length = 0;
   // Long enough to need the compactor, so its node is written only after the failed append has settled and the queue is empty.

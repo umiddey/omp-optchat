@@ -19,23 +19,23 @@ test('I1/I2 three consecutive runs, including a loop with several tool calls', a
     let previous: ReturnType<typeof sequence> | undefined;
     for (let run = 0; run < 4; run++) {
       const request = payload(memory.render(), `question ${run}`);
-      cachePayload(request);
-      const first = sequence(request);
+      const first = sequence(cachePayload(structuredClone(request)));
       if (previous) {
         const lastWhole = previous.findLastIndex(b => b.whole);
         const shared = compare(previous, first);
         assert.ok(shared.prefix > lastWhole, 'I2 old whole view is identical'); assert.ok(shared.reusable);
       }
       // Three call/result pairs in the same run. Previous content is never rewritten.
+      let old = first;
       for (let call = 0; call < 3; call++) {
-        const old = sequence(request);
         request.messages.push({ role: 'assistant', content: [{ type: 'tool_use', id: `tool-${call}`, name: 'zoom', input: { id: call } }] } as unknown as typeof request.messages[number]);
         request.messages.push({ role: 'user', content: [{ type: 'tool_result', tool_use_id: `tool-${call}`, content: 'result' }] } as unknown as typeof request.messages[number]);
-        // Already split payloads model provider requests; don't split them a second time.
-        const next = sequence(request);
+        const next = sequence(cachePayload(structuredClone(request)));
         assert.equal(compare(old, next).prefix, old.length, 'I1 prefix unchanged in tool loop');
+        assert.ok(compare(old, next).reusable);
+        old = next;
       }
-      previous = sequence(request);
+      previous = old;
       memory.append('user', `question ${run}`); memory.append('talk', `answer ${run}`);
       await memory.settle(undefined, 'tree');
     }
@@ -46,11 +46,20 @@ test('I3 a >128000-byte batch shrinks to <=64000 and breaks the prefix once', as
   const memory = new Memory(dir, async () => 's'.repeat(300), () => {});
   try {
     let previous = '', breaks = 0;
+    let previousBlocks: ReturnType<typeof sequence> = [];
     for (let i = 0; i < 435; i++) {
       memory.append('note', `${i} ${'x'.repeat(600)}`); await memory.settle(undefined, 'tree');
       const view = memory.render();
-      if (previous && !view.startsWith(previous.slice(0, -'</chat>'.length))) { breaks++; assert.ok(memory.size <= 64000); }
-      previous = view;
+      const blocks = sequence(cachePayload(payload(view)));
+      const batch = !!previous && !view.startsWith(previous.slice(0, -'</chat>'.length));
+      if (batch) { breaks++; assert.ok(memory.size <= 64000); }
+      if (previousBlocks.length) {
+        const shared = compare(previousBlocks, blocks);
+        const lastWhole = previousBlocks.findLastIndex(b => b.whole);
+        if (batch) assert.ok(shared.prefix <= lastWhole, 'only batch rewrites old view blocks');
+        else { assert.ok(shared.prefix > lastWhole); if (lastWhole >= 0) assert.ok(shared.reusable); }
+      }
+      previous = view; previousBlocks = blocks;
     }
     assert.equal(breaks, 1);
   } finally { await memory.close(); rmSync(dir, { recursive: true, force: true }); }

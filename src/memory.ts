@@ -116,7 +116,7 @@ export class Memory {
   /** The last store write still running, if any. Once an append fails, later writes are skipped and appends throw, as after a failed file write. */
   private writing?: Promise<void>;
   private failed?: string;
-  /** Where this memory's local files live: all of it for a FileStore, and the browser page, runs and imports for any store. */
+  /** Directory containing this memory's persisted log, tree and view. */
   readonly directory: string;
   readonly store: Store;
   lastError?: string;
@@ -127,7 +127,7 @@ export class Memory {
     return new Memory({ directory, store, saved: await store.load() }, compress, warn, budget, jobs);
   }
   /** A directory alone opens a FileStore there. `jobs`: summaries built at once, and how many unbuilt lines a new message's node
-   * waits behind. Chat keeps 8; imports pass the "Import: summaries at once" setting. */
+   * waits behind. The main chat keeps at most eight workers. */
   constructor(source: string | { directory: string; store: Store; saved: Saved }, private readonly compress: Compressor,
     private readonly warn: (s: string) => void = console.error,
     readonly budget = VIEW, private readonly jobs = 8, private readonly retryMs = 10_000) {
@@ -303,12 +303,9 @@ export class Memory {
   }
   /** A 'turn' waits until every part of the view is built, or until everything pending has failed: it then goes on with placeholders
    * for the missing lines, `lastError` says why, and the failed nodes are still retried in the background. 'tree' waits for every
-   * node, through failures. As in the recipe, the view may run over budget until pending merges land.
-   * 'ahead' (imports) waits until a new message's node would start at once. Due merges count too: messages go first, so a steady
-   * stream of them would otherwise take every worker and the views could never merge. */
-  async settle(signal?: AbortSignal, until: 'turn' | 'tree' | 'ahead' = 'turn'): Promise<void> {
+   * node, through failures. The view may run over budget until pending merges land. */
+  async settle(signal?: AbortSignal, until: 'turn' | 'tree' = 'turn'): Promise<void> {
     const done = () => until === 'tree' ? this.ready && this.busy.size === 0 && this.tree.size === this.expectedNodes()
-      : until === 'ahead' ? this.unbuilt.size + this.merges.size < this.jobs
       : this.ready || this.stalled;
     if (done()) return;
     if (this.stopped || signal?.aborted) throw new Error('Memory wait cancelled.');

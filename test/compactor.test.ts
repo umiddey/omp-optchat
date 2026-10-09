@@ -56,3 +56,21 @@ test('cold parallel prefixes wait for first response, warm prefix proceeds, canc
   calls.forEach(c => { c.answer(); c.finish(); }); await Promise.all([first, ...rest]);
   const warm = run(); await pause(); assert.equal(calls.length, 4); calls[3].answer(); calls[3].finish(); await warm;
 });
+test('a failing primer releases a waiting longer prefix instead of hanging', async () => {
+  const calls: { fail: () => void; finish: () => void }[] = [];
+  streaming = () => {
+    const stream = ai.createAssistantMessageEventStream(), message = reply('summary');
+    stream.push({ type: 'start', partial: message });
+    calls.push({
+      fail: () => { message.stopReason = 'error'; message.errorMessage = 'overloaded'; stream.push({ type: 'error', reason: 'error', error: message }); stream.end(); },
+      finish: () => { stream.push({ type: 'done', reason: 'stop', message }); stream.end(); },
+    });
+    return stream;
+  };
+  const compress = compressor(), context = '<chat>\n' + '0+1|note: remembered\n'.repeat(2000) + '</chat>';
+  const first = compress({ ...input, context }, new AbortController().signal).catch((e: Error) => e.message);
+  const longer = compress({ ...input, context: context.replace('</chat>', '0+1|note: newer\n'.repeat(4) + '</chat>') }, new AbortController().signal);
+  await new Promise(r => setTimeout(r, 20)); assert.equal(calls.length, 1);
+  calls[0].fail(); await new Promise(r => setTimeout(r, 20)); assert.equal(calls.length, 2);
+  calls[1].finish(); assert.equal(await first, 'overloaded'); assert.equal(await longer, 'summary');
+});
