@@ -2,6 +2,8 @@
   "name": "omp-optchat",
   "version": "0.1.0",
   "private": true,
+  "license": "MIT",
+  "repository": "github:umiddey/omp-optchat",
   "type": "module",
   "omp": {
     "extensions": [

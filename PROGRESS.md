@@ -182,3 +182,13 @@ Red-first:
 | Repeated scan header I/O | same complete suite | known Alpha header: 0 opens; new Beta header: 1 open | PASS |
 
 No live runs, merge, installation, push or temporary files in this review unit. Commit and stop.
+
+## Live verification round (2026-10-09, orchestrator)
+
+| Item | Observed | Result |
+|---|---|---|
+| OptChat main on Codex `gpt-6.1-sol`, 5 turns with tools + zoom | answers correct; 98.6% from cache after the first call, 0 misses | PASS |
+| OptChat main on GLM `glm-5.3-flash`, same script | answers correct; one miss on request 2 although bytes matched to 17.6k chars into the view (GLM had not stored request 1), then 99% | PASS (provider-side) |
+| Opus main, two background subagents (glm, luna), results start runs | before fix: first request of a result-started run re-sent the previous turn (live owner session: 45k tokens rewritten). OMP emits `message_end` fire-and-forget, so `context` ran before `runFirst` was set. Fix: the run opens after the previous run's last message (`lastEnd`). Red/green: `test/run-start.test.ts`. After fix: request opens `[view][async-result]`, main ≥96% on every call after the first | PASS |
+| `zoom("GlmCount")` from the main agent | returned the subagent transcript; model named its first bash command | PASS |
+| Restart with `--resume` across a plugin upgrade | first request full miss: static prompt and zoom tool text changed with the upgrade (expected once per upgrade) | expected |

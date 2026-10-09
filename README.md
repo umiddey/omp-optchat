@@ -6,8 +6,9 @@ model compresses the log into a tree of one-line summaries, and each turn the mo
 whole history instead of a growing (and compacted) session. It can `zoom` into any line down to the original
 message.
 
-Built so the prompt cache keeps working: in real Opus runs, every request after the first turn read 97–99% of
-its input from Anthropic's cache.
+Built so the prompt cache keeps working. Measured on real runs, every request after the first one:
+Anthropic Opus 97–99% of input read from cache, Codex `gpt-6.1-sol` 98.6%, GLM `glm-5.3-flash` 99% (after GLM
+stored the first request).
 
 ## Install
 
@@ -77,9 +78,15 @@ bunx tsc --noEmit
 ```
 
 Design and cache contract: [DESIGN.md](DESIGN.md). Cache check on real traffic: run OMP with
-`OMP_OPTCHAT_DUMP_DIR=<dir>`, then `bun scripts/cache-check.ts <dir> <session.jsonl>`.
+`OMP_OPTCHAT_DUMP_DIR=<dir>`, then `bun scripts/cache-check.ts <dir> <session.jsonl>`. Cache share per agent for
+any OMP session (main plus every subagent, misses with their likely cause):
+`bun scripts/cache-report.ts [session.jsonl | cwd]`.
 
 ## Credits
 
 Core ported from [pi-optchat](https://github.com/jonaslsaa/pi-optchat) by Jonas Silva (MIT); see
 [THIRD_PARTY_NOTICES.md](THIRD_PARTY_NOTICES.md). Recipe by Victor Taelin.
+
+## License
+
+MIT, see [LICENSE](LICENSE).
