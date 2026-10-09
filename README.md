@@ -17,8 +17,8 @@ omp plugin install github:umiddey/omp-optchat
 
 Update: `omp plugin upgrade omp-optchat`. Remove: `omp plugin uninstall omp-optchat`.
 
-Requires OMP 18.8.3 or newer and an Anthropic login (`/login`) for the summarizer model.
 Tested with OMP 18.8.3. Needs an Anthropic login (`/login`) for the summarizer model.
+
 ## Use
 
 ```sh
