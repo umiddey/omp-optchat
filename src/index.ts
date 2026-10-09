@@ -22,6 +22,8 @@ export default function optchat(pi: ExtensionAPI) {
   /** The run's first message as OMP holds it (asUser turns shown custom messages into user ones for the log). */
   let runFirst: AgentMessage | undefined;
   let view: string | undefined, memories = '', lastStart: AgentMessage | undefined;
+  /** The previous run's last message: everything after it opens the next run, even before that run's first message_end ran. */
+  let lastEnd: AgentMessage | undefined;
   let controller = new AbortController(), sequence = 0;
   // OMP marks shells it spawns with OMPCODE=1: an omp started from one inherits OMP_OPTCHAT but must not take the profile.
   const selected = () => pi.getFlag('optchat') || (process.env.OMPCODE === '1' ? undefined : process.env.OMP_OPTCHAT);
@@ -97,6 +99,11 @@ export default function optchat(pi: ExtensionAPI) {
         try { await m.settle(controller.signal); } finally { unsubscribe(); ctx.ui.setWorkingMessage(); }
         view = m.render(); flush();
       }
+      // OMP emits message_end fire-and-forget, so the first request of a run can arrive before runFirst is set.
+      if (running && !runFirst && lastEnd) {
+        const end = lastEnd, at = event.messages.findLastIndex(m => m.role === end.role && m.timestamp === end.timestamp);
+        if (at >= 0) runFirst = event.messages[at + 1];
+      }
       const first = running ? runFirst : lastStart;
       const at = turnStart(event.messages, first);
       if (running) lastStart = event.messages[at];
@@ -118,7 +125,7 @@ export default function optchat(pi: ExtensionAPI) {
   });
   pi.on('agent_end', (_event, ctx) => {
     if (!active(ctx)) return;
-    try { flush(); agents!.scan(ctx.sessionManager.getSessionFile()); } catch (error) { fail(error, ctx); }
+    try { flush(); lastEnd = run.at(-1) ?? lastEnd; agents!.scan(ctx.sessionManager.getSessionFile()); } catch (error) { fail(error, ctx); }
     running = false;
   });
   pi.on('session_shutdown', async (_event, ctx) => {
