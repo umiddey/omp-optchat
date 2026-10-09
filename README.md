@@ -97,6 +97,10 @@ Design and cache contract: [DESIGN.md](DESIGN.md). Cache check on real traffic: 
 any OMP session (main plus every subagent, misses with their likely cause):
 `bun scripts/cache-report.ts [session.jsonl | cwd]`.
 
+Release: bump `version` in `package.json`, commit and push, then `gh release create v<version> --generate-notes`.
+Publishing the GitHub release runs `.github/workflows/publish.yml`, which tests and publishes to npm (trusted
+publishing, no token).
+
 ## Credits
 
 Core ported from [pi-optchat](https://github.com/jonaslsaa/pi-optchat) by Jonas Silva (MIT); see
