@@ -100,3 +100,10 @@ Only `/tmp/optchat-evidence-sol-final-20261009/` is retained from this work:
 
 None for this assignment. Both milestones are complete; stop after committing
 this acceptance record. Do not install the extension or push a remote.
+
+## Orchestrator review (2026-10-09)
+- Fixed: a run started by a shown custom message (async result, report) faulted the session (turn start matched the log copy, role `user`, not OMP's `custom`) and would have put the view after that message. Regression test in `test/transcript.test.ts`.
+- Fixed: `OMP_OPTCHAT` inherited by an `omp` launched from an OMP shell (`OMPCODE=1`) is ignored; the `--optchat` flag still works.
+- Re-verified live after the fix: 5-turn smoke, real cacheRead share ≥ 0.9785 on turns ≥ 2, 0 unexpected breaks; long-message smoke exercised the Haiku compactor (lines ≤ 512 B, 0 unbuilt), turn 2/3 shares 0.970 / 0.987.
+- Not proven live: batch merge (128 KB → 64 KB) and the 20-block lookback across big turns; covered by unit tests I2/I3 only.
+- Installed: `~/.omp/agent/extensions/optchat -> /home/ukd/projects/omp-optchat`. Evidence dumps in /tmp were deleted after review.

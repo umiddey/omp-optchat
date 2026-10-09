@@ -38,7 +38,7 @@ their results are logged like any tool result.
 
 | Hook | Behavior when active |
 |---|---|
-| `session_start` | open memory + lock; activate tools `zoom`,`date`; runtime-override OMP auto-compaction off (find the setting id in `/tmp/omp-src/pi-coding-agent/src/session/context-settings.ts`; use `lookup(id).override(pi.pi.settings,false)`, never persisted); status line. |
+| `session_start` | open memory + lock; activate tools `zoom`,`date`; runtime-override OMP auto-compaction off (setting `compaction.enabled`, `pi-coding-agent/src/session/context-settings.ts`; `lookup(id).override(pi.pi.settings,false)`, never persisted); status line. |
 | `session_before_compact` | `{ cancel: true }` (backstop). |
 | `before_agent_start` | Return `systemPrompt` = `event.systemPrompt` with (a) every element starting with `<memories>` removed and stashed for this run, (b) the OptChat static prompt inserted as its own element immediately before the first element starting with `<project-context>` (or appended if none). Static = byte-identical every call: no dates, ids, counts. |
 | `message_end` | Buffer the message in `run` (pi-optchat `index.ts` 326-362 pattern). Messages are logged to memory only after the run's view is frozen, so the view never contains the current run. |
@@ -57,7 +57,7 @@ their results are logged like any tool result.
 4. Notices kept from before turn start (stable persisted bytes; they deliver tool/xd:// roster deltas once):
    custom messages whose `customType` equals the values of `TOOL_ROSTER_NOTICE_MESSAGE_TYPE`,
    `EVAL_PRELUDE_NOTICE_MESSAGE_TYPE`, `SESSION_AGENT_NOTICE_MESSAGE_TYPE`, `XDEV_MOUNT_NOTICE_MESSAGE_TYPE`
-   (used in `/tmp/omp-src/pi-coding-agent/src/session/session-tools.ts` ~1515-1718; grep the constant values).
+   (used in `pi-coding-agent/src/session/session-tools.ts` ~1515-1718; grep the constant values).
 5. Not in a run (side turns, `/btw`, handoff call `transformContext` too): never send full history. Build from
    `memory.render()` (no settle wait) + messages after the last run's turn start.
 6. Any failure: `ctx.abort()` and return a single system message "OptChat context unavailable. Stop." —
@@ -86,7 +86,7 @@ Facts from OMP 18.8.3 source:
 - `extensions/runner.ts` 2022-2030: messages a `context` hook changes are marked per-call; OMP's own message
   marks avoid them. Irrelevant once we own all marks, but explains why OMP's default marks would miss the view.
 
-Mark placement in `before_provider_request` (port `/tmp/pi-optchat/src/cache.ts`, change TTL handling):
+Mark placement in `before_provider_request` (port pi-optchat `src/cache.ts`, change TTL handling):
 1. Find the view text block (starts with `<chat>\n`); split it into 4-line blocks counted from its start
    (`splitView`), byte-identical concatenation.
 2. Remove every existing `cache_control` (tools, system, messages). Place marks on the view's last whole block
