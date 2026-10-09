@@ -107,3 +107,49 @@ this acceptance record. Do not install the extension or push a remote.
 - Re-verified live after the fix: 5-turn smoke, real cacheRead share ≥ 0.9785 on turns ≥ 2, 0 unexpected breaks; long-message smoke exercised the Haiku compactor (lines ≤ 512 B, 0 unbuilt), turn 2/3 shares 0.970 / 0.987.
 - Not proven live: batch merge (128 KB → 64 KB) and the 20-block lookback across big turns; covered by unit tests I2/I3 only.
 - Installed: `~/.omp/agent/extensions/optchat -> /home/ukd/projects/omp-optchat`. Evidence dumps in /tmp were deleted after review.
+
+## Agent-name zoom (branch `zoom-name`, 2026-10-09)
+
+Complete: append-only/fsynced `agents.jsonl` in each active profile, task/async/IRC name discovery,
+recursive end-of-run discovery (including nested senders), restart resolution, newest-first duplicate
+selection with dated and exact-path selectors, nearest-name errors and missing-transcript errors.
+`zoom` now accepts a string `id`; numeric zoom and image retrieval remain unchanged. Transcript rendering
+is read-only, emits `kind|text` lines with escaped newlines, excludes thinking/hidden custom messages,
+and bounds each tool result to its first/last ~500 characters. Transcript and memory zoom share the same
+25,000-character paging implementation, including offsets, limits, hints and surrogate-pair handling.
+Shown async results and incoming peer messages log as `work`; task/async reports retain per-agent
+`Full chat: zoom("Name")` trailers inside the log cap. Static prompt/tool descriptions updated once;
+README and DESIGN describe the interface without changing I1–I7.
+
+Files: `src/agents.ts`, `src/paging.ts`, `src/index.ts`, `src/memory.ts`, `src/tools.ts`,
+`src/transcript.ts`, `src/prompts.ts`, `test/agents.test.ts`, `README.md`, `DESIGN.md`, `PROGRESS.md`.
+
+Red-first evidence:
+- `bun test /home/ukd/projects/omp-optchat-zoom/test/agents.test.ts`: exit 1, 0 pass / 8 fail.
+  Seven new API tests failed because the agent-index/renderer module did not exist yet; the logging
+  test observed `echo,user,user` instead of `echo,work,work`. Tests retain append/restart, duplicates,
+  missing/unknown files, rendering, paging, trailers and numeric/string tool assertions.
+- `bun test /home/ukd/projects/omp-optchat-zoom/test/agents.test.ts --test-name-pattern 'nested sender'`:
+  exit 1, 0 pass / 1 fail; resolved a nonexistent direct-child path instead of the existing nested
+  transcript. Corrected path discovery, not the assertion. No tests skipped or assertions weakened.
+- The first full implementation check exposed OMP's Zod-like facade lacking `z.iso`/`ZodType`
+  (tests exit 1, TypeScript exit 2). Read the installed facade declaration, used its supported
+  string/refine surface and corrected union narrowing. Final suite below includes a main lifecycle
+  test invoking hooks without launching OMP or calling a provider.
+
+| Item | Command | Observed result | PASS/FAIL |
+|---|---|---|---|
+| Complete tests, including I1–I7 | `bun test` | exit 0; 67 pass, 0 fail, 8 files | PASS |
+| TypeScript | `bunx tsc --noEmit` | exit 0; no diagnostics | PASS |
+| Existing transcript, read-only | `bun /home/ukd/projects/omp-optchat-zoom/scripts/.zoom-probe.ts` (throwaway script, removed) | exit 0; 252,440 rendered characters, 11 pages; printed the complete first 25,000-character page with next offset 25,000; displayed first 20 output lines | PASS |
+| Verified OMP API | `npm pack @oh-my-pi/pi-coding-agent@18.8.3 --pack-destination /tmp`, extract/read source | exit 0; session-manager.ts:3093–3094 returns the session file; IRC details.from and task progress/results metadata inspected | PASS |
+| Cleanup / boundaries | remove temporary probe and packed source | throwaway probe, `/tmp/omp-src-sol` and downloaded archive removed; test fixture directories removed in finally blocks; no live OMP session, installation, remote push or edits outside worktree | PASS |
+
+Real transcript used:
+`/home/ukd/.omp/agent/sessions/-Work-gateforge/2026-10-06T05-15-55-164Z_01a10fa3-cb9c-7201-b91a-acfe1257b3f2/Gf015Wp1.jsonl`.
+Probe called exported `renderTranscript(file)` and shared `pageText`, printed page one, and counted
+pages by following the returned next offsets to the rendered text's end. Its first twenty output
+lines showed the brief, tool calls, capped tool echoes and a shown async completion as `work`.
+No transcript or other file under `~/.omp` was written.
+
+Stop point: commit the green unit on `zoom-name`, report, stop. No merge, install, push or live probe.

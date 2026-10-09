@@ -65,7 +65,20 @@ their results are logged like any tool result.
 
 Logging (recipe §1, pi-optchat `transcript.ts` `logMessage`/`boundedMessage`): user → `user`; assistant text →
 reply kind; tool calls → `tool` (`name JSON`); tool results → `echo`, head+tail capped to 30,000 chars; displayed
-custom messages → `user` text prefixed `[customType] `; hidden custom messages and thinking → not logged.
+custom messages → `user` text prefixed `[customType] `, except `async-result` and `irc:incoming` → `work`;
+task/async reports end with `Full chat: zoom("Name")` per agent (preserved inside the cap).
+Hidden custom messages and thinking → not logged.
+
+Agent transcript navigation (recipe §6): `zoom("Name")` accepts a string `id`, renders the OMP transcript
+as `kind|text` lines (newlines escaped; tool results head+tail ~500 characters), and shares original-message
+offset/limit paging at 25,000 characters, including Unicode surrogate boundaries. Numeric zoom is unchanged.
+The profile's `agents.jsonl` is append-only and fsynced, recording name, absolute transcript path, session
+file and creation date. Names in task results, shown async deliveries and peer messages are resolved under
+`ctx.sessionManager.getSessionFile()` without `.jsonl`; `agent_end` recursively discovers all child transcripts.
+Names survive profile restarts; duplicates select the newest creation date and list other matches with
+`Name@<ISO date>` selectors (or `Name@<absolute transcript path>` for exact selection, including tied dates).
+Unknown names list nearby names; removed transcripts give a clear error. Match metadata is outside paged offsets.
+Only active main sessions write the index; transcript files themselves are never modified.
 
 ## Cache contract (the reason this exists)
 

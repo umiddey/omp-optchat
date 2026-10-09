@@ -88,6 +88,12 @@ messages it was made from; zoom(id, 1) gives message id in full.
 date(id) gives the date and time of message id. You can zoom out too:
 zoom(id, n) opens any summarized block with n a power of 2 and id a
 multiple of n, so from a message you can open the summaries above it.
+zoom("Name") gives a subagent's whole chat as kind|text lines (pass the name as
+the id parameter). Reports include Full chat trailers; shown async reports and
+peer messages have kind work. Transcripts and long original messages are paged
+with offset/limit, at most 25,000 characters; follow the returned next offset.
+Duplicate names choose the newest; other matches list dates and selectors:
+zoom("Name@<ISO date>") or zoom("Name@<absolute transcript path>").
 
 The view is your memory, and its latest word on a thing is the truth. Whenever
 you need any information, first find its latest mention in the view and zoom

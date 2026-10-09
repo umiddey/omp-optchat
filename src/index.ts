@@ -11,10 +11,12 @@ import { asUser, boundedMessage, logMessage } from './transcript.ts';
 import { saveImages } from './images.ts';
 import { preparePrompt, projectContext, providerPayload, turnStart } from './integration.ts';
 import { registerMemoryTools } from './tools.ts';
+import { AgentIndex } from './agents.ts';
 
 export default function optchat(pi: ExtensionAPI) {
   pi.registerFlag('optchat', { type: 'string', description: 'Use a never-ending OptChat memory profile (main agent only)' });
   let memory: Memory | undefined, release: (() => Promise<void>) | undefined;
+  let agents: AgentIndex | undefined;
   let fault: string | undefined;
   let run: AgentMessage[] = [], logged = 0, running = false;
   /** The run's first message as OMP holds it (asUser turns shown custom messages into user ones for the log). */
@@ -34,7 +36,10 @@ export default function optchat(pi: ExtensionAPI) {
     fault = error instanceof Error ? error.message : String(error);
     controller.abort(); ctx.abort(); ctx.ui.notify(fault, 'error');
   };
-  registerMemoryTools(pi, required);
+  registerMemoryTools(pi, required, () => {
+    if (!agents) throw new Error('OptChat agent index is unavailable.');
+    return agents;
+  });
   pi.on('session_start', async (_event, ctx) => {
     if (!active(ctx) || memory || fault) return;
     try {
@@ -43,6 +48,7 @@ export default function optchat(pi: ExtensionAPI) {
       release = await lockProfile(dir, `OMP PID ${process.pid} (${ctx.cwd})`);
       const config = loadConfig(dir);
       memory = await Memory.open(dir, createCompressor(ctx.modelRegistry, () => config.compactor), text => ctx.ui.notify(text, 'warning'));
+      agents = new AgentIndex(dir, text => ctx.ui.notify(text, 'warning'));
       const setting = lookup('compaction.enabled');
       if (!setting) throw new Error('OMP compaction.enabled setting unavailable.');
       setting.override(pi.pi.settings, false);
@@ -73,8 +79,9 @@ export default function optchat(pi: ExtensionAPI) {
   pi.on('message_end', async (event, ctx) => {
     if (!active(ctx) || !running) return;
     try {
-      const message = asUser(boundedMessage(event.message));
-      if (message.role === 'user' || (message.role === 'toolResult' && message.toolName !== 'zoom')) await saveImages(required().store, message.content);
+      const message = boundedMessage(event.message), shown = asUser(message);
+      agents!.recordMessage(event.message, ctx.sessionManager.getSessionFile());
+      if (shown.role === 'user' || (shown.role === 'toolResult' && shown.toolName !== 'zoom')) await saveImages(required().store, shown.content);
       runFirst ??= event.message;
       run.push(message);
       if (view !== undefined) flush();
@@ -111,7 +118,7 @@ export default function optchat(pi: ExtensionAPI) {
   });
   pi.on('agent_end', (_event, ctx) => {
     if (!active(ctx)) return;
-    try { flush(); } catch (error) { fail(error, ctx); }
+    try { flush(); agents!.scan(ctx.sessionManager.getSessionFile()); } catch (error) { fail(error, ctx); }
     running = false;
   });
   pi.on('session_shutdown', async (_event, ctx) => {

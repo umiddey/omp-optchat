@@ -1,6 +1,30 @@
 import type { AgentMessage } from '@oh-my-pi/pi-agent-core';
 import { CAP, cap, type Memory } from './memory.ts';
 import { imageRef, isImage } from './images.ts';
+import { z } from '@oh-my-pi/pi-coding-agent';
+
+const detailsSchema = z.object({ progress: z.array(z.unknown()).optional(), results: z.array(z.unknown()).optional(), jobs: z.array(z.unknown()).optional(), from: z.string().optional() });
+const agentSchema = z.object({ id: z.string().optional(), jobId: z.string().optional(), type: z.string().optional() });
+/** Names advertised by OMP; never interpret tool output or arbitrary custom text as a path. */
+export function agentNames(message: AgentMessage): string[] {
+  if (!(message.role === 'toolResult' && message.toolName === 'task') &&
+      !(message.role === 'custom' && message.display && ['async-result', 'irc:incoming'].includes(message.customType))) return [];
+  const parsed = detailsSchema.safeParse(message.details);
+  if (!parsed.success) return [];
+  const details = parsed.data, names: string[] = [];
+  if (message.role === 'custom' && message.customType === 'irc:incoming' && details.from) names.push(details.from);
+  for (const item of [...details.progress ?? [], ...details.results ?? [], ...details.jobs ?? []]) {
+    const agent = agentSchema.safeParse(item);
+    if (!agent.success || (agent.data.type && agent.data.type !== 'task')) continue;
+    const name = agent.data.id ?? agent.data.jobId;
+    if (name) names.push(name);
+  }
+  return [...new Set(names.filter(name => /^[\w.-]+$/.test(name)))];
+}
+const reportText = (text: string, names: string[]) => {
+  const trailer = names.map(name => `Full chat: zoom(${JSON.stringify(name)})`).join('\n');
+  return trailer ? cap(text, CAP - trailer.length - 1) + '\n' + trailer : cap(text);
+};
 export function textContent(content: unknown, images = true): string {
   if (typeof content === 'string') return content;
   if (!Array.isArray(content)) return '';
@@ -23,6 +47,10 @@ export function asUser(message: AgentMessage): AgentMessage {
 export function logMessage(memory: Memory, original: AgentMessage) {
   const message = asUser(original);
   const date = new Date(message.timestamp).toISOString();
+  if (original.role === 'custom' && original.display && ['async-result', 'irc:incoming'].includes(original.customType)) {
+    memory.append('work', reportText(`[${original.customType}] ${textContent(original.content)}`, original.customType === 'async-result' ? agentNames(original) : []), date);
+    return;
+  }
   if (message.role === 'user') memory.append('user', textContent(message.content), date);
   else if (message.role === 'assistant') {
     for (const block of message.content) {
@@ -33,7 +61,7 @@ export function logMessage(memory: Memory, original: AgentMessage) {
       memory.append('echo', `Agent ${message.stopReason}: ${message.errorMessage ?? 'No further details'}`, date);
   } else if (message.role === 'toolResult')
     // A zoom's page already names the images it returns.
-    memory.append('echo', cap(`${message.toolName}: ${textContent(message.content, message.toolName !== 'zoom')}`), date);
+    memory.append('echo', reportText(`${message.toolName}: ${textContent(message.content, message.toolName !== 'zoom')}`, agentNames(original)), date);
 }
 export function boundedMessage(message: AgentMessage): AgentMessage {
   if (message.role !== 'toolResult') return message;

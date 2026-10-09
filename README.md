@@ -31,7 +31,18 @@ omp --optchat main
 - One OMP window per profile at a time: a second window on the same profile is refused. Other OMP windows without
   the flag, or on another profile, are unaffected.
 - The model gets two tools: `zoom(id, n)` opens a summary line, `zoom(id, 1)` returns the original message,
-  `date(id)` returns when it was sent.
+  `zoom("Name")` opens a subagent's whole transcript, and `date(id)` returns when a memory message was sent.
+  Pass a name as the zoom tool's `id` parameter, e.g. `{"id":"Name"}`. Long messages and transcripts page at
+  25,000 characters with `offset`/`limit`; follow the next offset in the response.
+  Duplicate names default to the newest transcript and list other matches with dates: select one with
+  `zoom("Name@<ISO date>")`, or `zoom("Name@<absolute transcript path>")` for an exact match.
+  Transcript pages are `kind|text` lines (newlines escaped), with tool results bounded to their first/last
+  ~500 characters. Match metadata does not count toward transcript offsets.
+- The profile's append-only, flushed `agents.jsonl` keeps names, absolute transcript paths, owning session
+  files and creation dates across OMP restarts. Task results, async reports and peer messages index agents;
+  the end of each main run also discovers nested transcripts. The OMP transcript files remain read-only
+  and in their original location; missing files produce an error, not a substitute transcript.
+  Shown async reports and peer messages log as `work`; task/async reports include `Full chat: zoom("Name")`.
 - Before a turn starts, the previous turn's messages are summarized; that usually takes a few seconds and shows as
   "Waiting for OptChat summaries…".
 
