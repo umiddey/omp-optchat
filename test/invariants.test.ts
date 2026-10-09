@@ -89,6 +89,15 @@ test('I5 <=4 identical OMP TTL marks, date follows view, no cache object means n
   const thinking = payload(view); thinking.messages.push({ role: 'assistant', content: [{ type: 'thinking', thinking: 'private' }, { type: 'redacted_thinking', data: 'private' }, { type: 'text', text: '' }] } as unknown as typeof thinking.messages[number]);
   cachePayload(thinking); assert.equal(sequence(thinking).filter(b => b.marked).length, 4);
 });
+test('the system prompt stays cached when the view has no reusable mark (new profile, huge turn)', () => {
+  const lines = (n: number) => '<chat>\n' + Array.from({ length: n }, (_, i) => `${i}+1|note: line ${i}\n`).join('') + '</chat>';
+  for (const [before, after] of [[1, 3], [10, 400]]) {
+    const first = payload(lines(before), 'q1'), second = payload(lines(after), 'q2');
+    cachePayload(first); cachePayload(second);
+    const result = compare(sequence(first), sequence(second));
+    assert.ok(result.reusable, `${before} -> ${after} lines reuses nothing`);
+  }
+});
 test('I6/I7 inactive and child/advisor contexts prompts payloads untouched', () => {
   const prompts = ['identity', '<memories>recall</memories>'];
   const messages: AgentMessage[] = [{ role: 'user', content: 'original', timestamp: 0 }];

@@ -38,7 +38,13 @@ export function cachePayload(payload: unknown): unknown {
       content.splice(content.indexOf(blocks[blocks.length - 1]) + 1, 0, block);
     }
     if (!control) return payload;
-    for (const back of [0, 20, 40]) {
+    // Fallback entry: tools + system never change in a session, so a turn whose view marks find nothing (a new
+    // profile's tiny view, a batch merge, a turn that adds more than 160 lines) still reads them from the cache.
+    const system = Array.isArray(payload.system) ? payload.system.findLast(record) : undefined;
+    if (system) system.cache_control = control;
+    // The view's last whole block and the one 20 back: Anthropic looks back 20 blocks from a mark, so together
+    // they find the last turn's entry after a turn adds up to 40 blocks (160 lines).
+    for (const back of system ? [0, 20] : [0, 20, 40]) {
       const block = blocks[blocks.length - 2 - back];
       if (block) block.cache_control = control;
     }

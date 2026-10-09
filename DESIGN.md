@@ -89,9 +89,12 @@ Facts from OMP 18.8.3 source:
 Mark placement in `before_provider_request` (port pi-optchat `src/cache.ts`, change TTL handling):
 1. Find the view text block (starts with `<chat>\n`); split it into 4-line blocks counted from its start
    (`splitView`), byte-identical concatenation.
-2. Remove every existing `cache_control` (tools, system, messages). Place marks on the view's last whole block
-   and the blocks 20 and 40 before it (when they exist), plus one on the last cacheable block of the request
-   (skip thinking/redacted_thinking/empty text) — total ≤ 4.
+2. Remove every existing `cache_control` (tools, system, messages). Place marks on the last system block (fallback
+   entry: tools + system are stable for the session, so a turn whose view marks find nothing still reads them),
+   the view's last whole block and the block 20 before it (when it exists), plus one on the last cacheable block of
+   the request (skip thinking/redacted_thinking/empty text) — total ≤ 4. Without a system block the third view mark
+   (40 back) is used instead. Found live 2026-10-09: with view marks only, a new profile's first turns (view < 4
+   lines, no view mark) re-wrote the whole ~30k-token prefix every turn.
 3. Move the date/cwd reminder block after the view blocks (inside the same user message).
 4. Optional debug: when `OMP_OPTCHAT_DUMP_DIR` is set, write each final payload as
    `<dir>/<seq>-<agentKind>.json` (main only unless dumping children for the subagent check).
