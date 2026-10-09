@@ -5,10 +5,11 @@ logged, compressed into a binary tree of ≤512-byte lines, and each turn the mo
 `[tools][system][view][current turn]` instead of the OMP session history.
 
 Sources (read-only references):
-- Recipe: `/tmp/optchat-gist.md` (the spec; section numbers below refer to it).
-- Port source: `/tmp/pi-optchat` @ `6804bec30c564e0a9500d54ddb7d9a3ba6869e53` (MIT, Jonas Silva). Pi extension
+- Recipe: https://gist.github.com/VictorTaelin/91837951a5ce5b38f341ec1ba1df6449 (the spec; section numbers below refer to it).
+- Port source: https://github.com/jonaslsaa/pi-optchat @ `6804bec30c564e0a9500d54ddb7d9a3ba6869e53` (MIT, Jonas Silva). Pi extension
   implementing the recipe. Port its core; keep its LICENSE notice in `THIRD_PARTY_NOTICES.md`.
-- OMP 18.8.3 source: `/tmp/omp-src/{pi-coding-agent,pi-ai,pi-agent-core}/src` (same version as `omp --version`).
+- OMP 18.8.3 source: `npm pack @oh-my-pi/{pi-coding-agent,pi-ai,pi-agent-core}@18.8.3` (same version as `omp --version`);
+  file:line references below are into those packages' `src/`.
 - OMP docs: `omp://extensions.md`, `omp://extension-loading.md`, `omp://hooks.md`.
 
 ## Scope
