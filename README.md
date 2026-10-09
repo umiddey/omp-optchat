@@ -24,13 +24,26 @@ Tested with OMP 18.8.3. Needs an Anthropic login (`/login`) for the summarizer m
 
 ## Use
 
+Installing changes nothing until you turn it on. Start OMP with:
+
 ```sh
 omp --optchat main
 ```
 
+The first plain `omp` after installing shows this once, as an on-screen hint (it never reaches the model).
+
+Make it the default, so a plain `omp` always uses the memory: add this to `~/.bashrc` or `~/.zshrc`:
+
+```sh
+export OMP_OPTCHAT=main
+```
+
+Or keep plain `omp` as it is and add a short command for the memory one: `alias omo='omp --optchat main'`.
+
 - `main` is the memory profile; any name works (`--optchat work`, `--optchat personal`). Memories are separate per
   profile and live in `~/.omp/optchat/<profile>/` (override the root with `OMP_OPTCHAT_HOME`).
-- Without the flag OMP behaves exactly as before. `OMP_OPTCHAT=<profile>` in the environment works too.
+- Without the flag or `OMP_OPTCHAT`, OMP behaves exactly as before. Subagents and shells OMP itself starts never
+  take the profile.
 - One OMP window per profile at a time: a second window on the same profile is refused. Other OMP windows without
   the flag, or on another profile, are unaffected.
 - The model gets two tools: `zoom(id, n)` opens a summary line, `zoom(id, 1)` returns the original message,

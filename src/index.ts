@@ -5,7 +5,7 @@ import { lookup } from '@oh-my-pi/pi-coding-agent/config/registry';
 import type { AgentMessage } from '@oh-my-pi/pi-agent-core';
 import { Memory } from './memory.ts';
 import { createCompressor } from './compactor.ts';
-import { profilePath, loadConfig } from './config.ts';
+import { profilePath, loadConfig, firstRun, WELCOME } from './config.ts';
 import { lockProfile } from './profiles.ts';
 import { asUser, boundedMessage, logMessage } from './transcript.ts';
 import { saveImages } from './images.ts';
@@ -43,8 +43,15 @@ export default function optchat(pi: ExtensionAPI) {
     return agents;
   });
   pi.on('session_start', async (_event, ctx) => {
-    if (!active(ctx) || memory || fault) return;
+    if (!active(ctx)) {
+      // UI only, never model context: a plain session's prompt and cache stay untouched.
+      // A read-only or broken OptChat home must never disturb a plain session; the hint is simply skipped.
+      try { if (ctx.agent.kind === 'main' && ctx.mode === 'tui' && process.env.OMPCODE !== '1' && firstRun()) ctx.ui.notify(WELCOME, 'info'); } catch {}
+      return;
+    }
+    if (memory || fault) return;
     try {
+      firstRun();
       const dir = profilePath(String(selected()));
       mkdirSync(dir, { recursive: true, mode: 0o700 });
       release = await lockProfile(dir, `OMP PID ${process.pid} (${ctx.cwd})`);

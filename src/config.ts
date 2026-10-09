@@ -6,9 +6,18 @@ import type { ModelChoice } from './compactor.ts';
 import { atomicWrite } from './store.ts';
 import { record } from './cache.ts';
 export const defaults: { compactor: ModelChoice } = { compactor: { provider: 'anthropic', model: 'claude-haiku-5-5', thinking: Effort.Medium } };
+const home = () => resolve(process.env.OMP_OPTCHAT_HOME ?? join(homedir(), '.omp', 'optchat'));
 export function profilePath(name: string) {
   if (!/^[a-z0-9][a-z0-9_-]{0,63}$/.test(name)) throw new Error('Profile names: 1–64 lowercase letters, digits, hyphens, or underscores.');
-  return join(resolve(process.env.OMP_OPTCHAT_HOME ?? join(homedir(), '.omp', 'optchat')), name);
+  return join(home(), name);
+}
+export const WELCOME = 'OptChat is installed but off. Start it with `omp --optchat main`, or add `export OMP_OPTCHAT=main` to your shell profile to make it the default.';
+/** True exactly once per OptChat home: the first call leaves a marker, so the install hint never repeats. */
+export function firstRun() {
+  const marker = join(home(), '.welcomed');
+  if (existsSync(marker)) return false;
+  atomicWrite(marker, new Date().toISOString() + '\n');
+  return true;
 }
 export function loadConfig(dir: string): { compactor: ModelChoice } {
   mkdirSync(dir, { recursive: true, mode: 0o700 });
