@@ -153,3 +153,32 @@ lines showed the brief, tool calls, capped tool echoes and a shown async complet
 No transcript or other file under `~/.omp` was written.
 
 Stop point: commit the green unit on `zoom-name`, report, stop. No merge, install, push or live probe.
+
+### Review fixes after `452b840`
+
+- Never append predicted paths: names reported before a transcript appears remain unindexed until
+  discovery. Unknown-name resolution lazily scans the current session (via the live session-file getter
+  in the extension, or the last session supplied to the standalone index), so a delayed nested
+  transcript is accessible before `agent_end`.
+- Deduplicate name/path keys before opening or reading transcript headers, including message indexing.
+  Repeated scans still discover new directory entries but do not reopen known transcript files.
+- Updated existing fixtures to create real transcripts before indexing; the missing-file test now
+  removes an actually indexed file. Assertions were preserved. Added delayed-file/lazy-discovery
+  regressions and an openSync spy that proves known files are not reopened while a new header is read once.
+
+Red-first:
+- `bun test /home/ukd/projects/omp-optchat-zoom/test/agents.test.ts --test-name-pattern 'reported name waits|unknown names discover|second scan opens'`:
+  exit 1, 0 pass / 3 fail. Observed a persisted nonexistent path and an unknown-name error before discovery.
+  The initial default-export fs spy did not intercept named imports; corrected it to spy on the module namespace.
+- `bun test /home/ukd/projects/omp-optchat-zoom/test/agents.test.ts --test-name-pattern 'second scan opens'`:
+  exit 1, 0 pass / 1 fail; the corrected spy observed one open of the known Alpha header, violating the expected zero.
+  Both red checks preceded the index implementation fixes; no assertions were weakened.
+
+| Item | Command | Observed result | PASS/FAIL |
+|---|---|---|---|
+| Complete suite, including I1–I7 and review regressions | `bun test` | exit 0; 70 pass, 0 fail, 8 files | PASS |
+| TypeScript | `bunx tsc --noEmit` | exit 0; no diagnostics | PASS |
+| Delayed nested transcript / lazy unknown discovery | same complete suite | new tests green; one real nested record, no nonexistent direct path | PASS |
+| Repeated scan header I/O | same complete suite | known Alpha header: 0 opens; new Beta header: 1 open | PASS |
+
+No live runs, merge, installation, push or temporary files in this review unit. Commit and stop.

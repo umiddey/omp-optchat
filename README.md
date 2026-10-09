@@ -40,7 +40,9 @@ omp --optchat main
   ~500 characters. Match metadata does not count toward transcript offsets.
 - The profile's append-only, flushed `agents.jsonl` keeps names, absolute transcript paths, owning session
   files and creation dates across OMP restarts. Task results, async reports and peer messages index agents;
-  the end of each main run also discovers nested transcripts. The OMP transcript files remain read-only
+  the end of each main run also discovers nested transcripts. Names whose files have not appeared yet
+  wait for discovery; an unknown-name zoom scans the current session too, without waiting for run end.
+  Discovery reads headers only for new paths. The OMP transcript files remain read-only
   and in their original location; missing files produce an error, not a substitute transcript.
   Shown async reports and peer messages log as `work`; task/async reports include `Full chat: zoom("Name")`.
 - Before a turn starts, the previous turn's messages are summarized; that usually takes a few seconds and shows as

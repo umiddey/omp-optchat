@@ -1,6 +1,7 @@
-import { test } from 'bun:test';
+import { test, spyOn } from 'bun:test';
 import assert from 'node:assert/strict';
 import { mkdtempSync, mkdirSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
+import * as fs from 'node:fs';
 import { join, resolve } from 'node:path';
 import { tmpdir } from 'node:os';
 import type { AgentMessage } from '@oh-my-pi/pi-agent-core';
@@ -34,6 +35,7 @@ function transcript(file: string, text: string, date = '2026-10-01T00:00:00.000Z
 test('agent index appends durable records and resolves after restart without rewriting', async () => {
   const f = fixture();
   try {
+    for (const name of ['Alpha', 'Beta', 'Gamma', 'Delta']) transcript(join(f.childDir, `${name}.jsonl`), name, new Date(1).toISOString());
     const a = new AgentIndex(f.profile); a.recordMessage(task(['Alpha', 'Beta']), f.session);
     const file = join(f.profile, 'agents.jsonl'), first = readFileSync(file, 'utf8');
     const records = first.trim().split('\n').map(line => JSON.parse(line));
@@ -78,7 +80,9 @@ test('duplicate names choose newest and expose dated exact selectors across rest
 test('unknown names list nearest matches and missing transcripts give a clear error', async () => {
   const f = fixture();
   try {
+    for (const name of ['Alpha', 'Beta']) transcript(join(f.childDir, `${name}.jsonl`), name);
     const a = new AgentIndex(f.profile); a.recordMessage(task(['Alpha', 'Beta']), f.session);
+    rmSync(join(f.childDir, 'Alpha.jsonl'));
     assert.throws(() => a.zoom('Alph'), /Unknown agent.*Closest names: Alpha/);
     assert.throws(() => a.zoom('Alpha'), /Transcript.*Alpha.*no longer exists/);
     assert.throws(() => a.resolve('Alpha@missing'), /No transcript.*Alpha/);
@@ -187,6 +191,7 @@ test('main lifecycle indexes task/custom messages and recursively discovers tran
     abort: () => faults.push('abort'),
   } as unknown as ExtensionContext;
   try {
+    for (const name of ['Alpha', 'Beta', 'Gamma']) transcript(join(f.childDir, `${name}.jsonl`), name);
     process.env.OMP_OPTCHAT_HOME = f.dir; optchat(api);
     await hooks.get('session_start')!({}, ctx); await hooks.get('agent_start')!({}, ctx);
     await hooks.get('message_end')!({ message: task(['Alpha']) }, ctx);
@@ -208,4 +213,43 @@ test('main lifecycle indexes task/custom messages and recursively discovers tran
     if (oldHome === undefined) delete process.env.OMP_OPTCHAT_HOME; else process.env.OMP_OPTCHAT_HOME = oldHome;
     f.close();
   }
+});
+
+test('a reported name waits for its nested file and resolves lazily before agent_end', () => {
+  const f = fixture();
+  try {
+    const a = new AgentIndex(f.profile);
+    a.recordMessage(custom('irc:incoming', { from: 'Delayed' }, Date.now()), f.session);
+    assert.equal(fs.existsSync(join(f.profile, 'agents.jsonl')), false, 'never persist a predicted nonexistent path');
+    mkdirSync(join(f.childDir, 'Parent')); const path = join(f.childDir, 'Parent', 'Delayed.jsonl');
+    transcript(path, 'delayed', '2026-10-01T00:00:00.000Z');
+    assert.equal(a.zoom('Delayed'), 'user|delayed');
+    assert.equal(a.resolve('Delayed').match.path, path);
+    assert.equal(readFileSync(join(f.profile, 'agents.jsonl'), 'utf8').trim().split('\n').length, 1);
+  } finally { f.close(); }
+});
+
+test('unknown names discover the current session without a preceding report or agent_end', () => {
+  const f = fixture();
+  try {
+    const a = new AgentIndex(f.profile, () => {}, () => f.session);
+    transcript(join(f.childDir, 'Unreported.jsonl'), 'unreported');
+    assert.equal(a.zoom('Unreported'), 'user|unreported');
+  } finally { f.close(); }
+});
+
+test('a second scan opens only new transcript headers, never known paths', () => {
+  const f = fixture();
+  try {
+    const alpha = join(f.childDir, 'Alpha.jsonl'), beta = join(f.childDir, 'Beta.jsonl');
+    transcript(alpha, 'alpha'); const a = new AgentIndex(f.profile); a.scan(f.session);
+    transcript(beta, 'beta');
+    const opens = spyOn(fs, 'openSync');
+    try {
+      a.scan(f.session);
+      assert.equal(opens.mock.calls.filter(call => call[0] === alpha).length, 0, 'known header must not be opened again');
+      assert.equal(opens.mock.calls.filter(call => call[0] === beta).length, 1, 'new header is read once (spy observes actual I/O)');
+      assert.equal(a.resolve('Beta').match.path, beta);
+    } finally { opens.mockRestore(); }
+  } finally { f.close(); }
 });

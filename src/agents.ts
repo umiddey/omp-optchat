@@ -103,7 +103,8 @@ export class AgentIndex {
   private readonly file: string;
   private readonly records: AgentRecord[] = [];
   private readonly paths = new Set<string>();
-  constructor(directory: string, private readonly warn: (text: string) => void = console.error) {
+  private currentSessionFile: string | undefined;
+  constructor(directory: string, warn: (text: string) => void = console.error, private readonly getSessionFile?: () => string | undefined) {
     this.file = join(directory, 'agents.jsonl');
     if (!existsSync(this.file)) return;
     for (const [i, line] of readFileSync(this.file, 'utf8').split('\n').entries()) {
@@ -117,31 +118,38 @@ export class AgentIndex {
     if (this.paths.has(key)) return false;
     this.paths.add(key); this.records.push(record); return true;
   }
-  private append(name: string, path: string, sessionFile: string, date: string) {
-    const record = recordSchema.parse({ name, path: resolve(path), sessionFile: resolve(sessionFile), date });
-    if (this.paths.has(`${record.name}\0${record.path}`)) return;
+  private append(name: string, path: string, sessionFile: string, timestamp?: number) {
+    path = resolve(path);
+    if (this.paths.has(`${name}\0${path}`) || !existsSync(path)) return;
+    const record = recordSchema.parse({ name, path, sessionFile: resolve(sessionFile), date: transcriptDate(path, new Date(timestamp ?? Date.now()).toISOString()) });
     mkdirSync(resolve(this.file, '..'), { recursive: true, mode: 0o700 });
     appendJson(this.file, record); // append + fsync; never replace or truncate the index
     this.remember(record);
   }
   recordMessage(message: AgentMessage, sessionFile: string | undefined) {
+    this.currentSessionFile = sessionFile;
     if (!sessionFile) return;
     for (const name of agentNames(message)) {
       const root = sessionDirectory(sessionFile), direct = join(root, `${name}.jsonl`);
       const matches = existsSync(direct) ? [direct] : [...transcriptFiles(root)].filter(file => basename(file, '.jsonl') === name);
-      for (const path of matches.length ? matches : [direct])
-        this.append(name, path, sessionFile, transcriptDate(path, new Date(message.timestamp).toISOString()));
+      for (const path of matches) this.append(name, path, sessionFile, message.timestamp);
     }
   }
   scan(sessionFile: string | undefined) {
+    this.currentSessionFile = sessionFile;
     if (!sessionFile) return;
     const root = sessionDirectory(sessionFile);
     for (const file of transcriptFiles(root))
-      this.append(basename(file, '.jsonl'), file, sessionFile, transcriptDate(file, new Date().toISOString()));
+      this.append(basename(file, '.jsonl'), file, sessionFile);
   }
   resolve(selector: string): { match: AgentRecord; others: AgentRecord[] } {
     const at = selector.indexOf('@'), name = at < 0 ? selector : selector.slice(0, at), choice = at < 0 ? undefined : selector.slice(at + 1);
-    const matches = this.records.filter(record => record.name === name).sort((a, b) => b.date.localeCompare(a.date) || b.path.localeCompare(a.path));
+    let matches = this.records.filter(record => record.name === name);
+    if (!matches.length) {
+      this.scan(this.getSessionFile ? this.getSessionFile() : this.currentSessionFile);
+      matches = this.records.filter(record => record.name === name);
+    }
+    matches.sort((a, b) => b.date.localeCompare(a.date) || b.path.localeCompare(a.path));
     if (!matches.length) {
       const closest = [...new Set(this.records.map(record => record.name))].sort((a, b) => distance(name.toLowerCase(), a.toLowerCase()) - distance(name.toLowerCase(), b.toLowerCase()) || a.localeCompare(b)).slice(0, 5);
       throw new Error(`Unknown agent ${JSON.stringify(name)}. Closest names: ${closest.join(', ') || '(index is empty)'}.`);

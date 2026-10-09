@@ -48,7 +48,7 @@ export default function optchat(pi: ExtensionAPI) {
       release = await lockProfile(dir, `OMP PID ${process.pid} (${ctx.cwd})`);
       const config = loadConfig(dir);
       memory = await Memory.open(dir, createCompressor(ctx.modelRegistry, () => config.compactor), text => ctx.ui.notify(text, 'warning'));
-      agents = new AgentIndex(dir, text => ctx.ui.notify(text, 'warning'));
+      agents = new AgentIndex(dir, text => ctx.ui.notify(text, 'warning'), () => ctx.sessionManager.getSessionFile());
       const setting = lookup('compaction.enabled');
       if (!setting) throw new Error('OMP compaction.enabled setting unavailable.');
       setting.override(pi.pi.settings, false);

@@ -75,6 +75,9 @@ offset/limit paging at 25,000 characters, including Unicode surrogate boundaries
 The profile's `agents.jsonl` is append-only and fsynced, recording name, absolute transcript path, session
 file and creation date. Names in task results, shown async deliveries and peer messages are resolved under
 `ctx.sessionManager.getSessionFile()` without `.jsonl`; `agent_end` recursively discovers all child transcripts.
+Only existing transcript paths are indexed. A name reported before its file exists waits for discovery;
+unknown-name resolution also scans the current session's child tree so zoom works before `agent_end`.
+Discovery checks the in-memory name/path key before opening a header; known files are never reread by scans.
 Names survive profile restarts; duplicates select the newest creation date and list other matches with
 `Name@<ISO date>` selectors (or `Name@<absolute transcript path>` for exact selection, including tied dates).
 Unknown names list nearby names; removed transcripts give a clear error. Match metadata is outside paged offsets.
