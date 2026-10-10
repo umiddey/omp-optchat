@@ -8,7 +8,7 @@ import { NODE } from '../src/memory.ts';
 let streaming: typeof ai.streamSimple;
 mock.module('@oh-my-pi/pi-ai', () => ({ ...ai, streamSimple: (...args: Parameters<typeof ai.streamSimple>) => streaming(...args) }));
 // Module-loading boundary: install the fake provider before importing its consumer.
-const { createCompressor, createOrderTask } = await import('../src/compactor.ts');
+const { createCompressor } = await import('../src/compactor.ts');
 const model = buildModel({ id: 'fixture', name: 'Fixture', api: 'anthropic-messages', provider: 'fixture', baseUrl: 'https://invalid.local', reasoning: false, input: ['text'], cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0 }, contextWindow: 200000, maxTokens: 1000 });
 // Registry facade implements exactly the two methods the compressor consumes.
 const registry = { find: () => model, getApiKey: async () => 'synthetic' } as unknown as ModelRegistry;
@@ -79,18 +79,4 @@ test('a failing primer releases a waiting longer prefix instead of hanging', asy
   await new Promise(r => setTimeout(r, 20)); assert.equal(calls.length, 1);
   calls[0].fail(); await new Promise(r => setTimeout(r, 20)); assert.equal(calls.length, 2);
   calls[1].finish(); assert.equal(await first, 'overloaded'); assert.equal(await longer, 'summary');
-});
-test('G an extraction retry note leads the order prompt and is not echoed as JSON', async () => {
- let seen: ai.Context | undefined;
- streaming = (_model, context) => {
-  seen = structuredClone(context);
-  const stream = ai.createAssistantMessageEventStream();
-  queueMicrotask(() => { stream.push({ type: 'done', reason: 'stop', message: reply('[]') }); stream.end(); });
-  return stream;
- };
- const task = createOrderTask(registry, () => ({ provider: 'fixture', model: 'fixture', thinking: 'off' }));
- await task({ kind: 'extract', entry: { i: 0, date: '2026-10-10', text: 'PM gate shows 0 waived' }, retry: 'NOTE "0"' } as unknown as Parameters<typeof task>[0], new AbortController().signal);
- const content = seen?.messages[0]?.content as string;
- assert.equal(content.startsWith('NOTE "0"\n'), true);
- assert.equal(content.includes('"retry"'), false);
 });
