@@ -1,6 +1,5 @@
 import { describe, expect, test } from 'bun:test';
 import { missingTokens } from '../src/orders.ts';
-import { EXTRACT_ORDERS, MIGRATE_LEDGER, CONSOLIDATE_ORDERS } from '../src/prompts.ts';
 
 describe('must-keep condition words and negation', () => {
   test('not is satisfied by n\'t', () => {
