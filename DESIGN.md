@@ -91,10 +91,15 @@ goal/rule/policy may resolve its reference as `"user's words" (chosen: option te
 Context never supplies an order by itself. Task-scoped assignments, operations and deployment
 approvals remain excluded: standing orders apply beyond the current task.
 
-Consolidation must not interpret, speculate, normalize names or correct spelling. Its only
-allowed annotations are `(replaces msg N)` and the already-extracted `(chosen: ...)` text.
-These restrictions are prompt contracts; real-model replay measures compliance separately
-from deterministic context/persistence tests.
+Consolidation restates each order as one clear, self-contained sentence or two, merging an order spread
+over several messages into one item and fixing typos and names (`gatefoge` → `Gateforge`). It must not
+interpret, speculate or add commentary; its only allowed annotations are `(replaces msg N)` and the
+already-extracted `(chosen: ...)` text. Restating never drops a condition: code checks that every
+previous and newly extracted order is covered by an item of its kind sharing one of its source ids,
+keeping its must-keep tokens (numbers, paths, URLs, ids, code-ish tokens, condition words, and names of
+five or more letters within edit distance 2). A gap retries with the missing tokens listed; after the
+last attempt only the failing order falls back to its verbatim text, with one warning. `zoom(id, 1)`
+shows the user's exact words. Prompt contracts are measured by real-model replay; the guard is code.
 
 Extraction records now contain typed directives: `{text,kind:"rule"|"goal",until?:string}` and
 `{retire:[text or numeric source ids]}`. Legacy string records load as rules without rewriting
@@ -103,12 +108,12 @@ goals carry user-worded/resolved done-conditions, never an invented expiration. 
 drop or retirement messages (including contextual "yes retire it") are the only retirement
 authority. Assistant status and model judgement are not.
 
-Consolidation applies recorded retirement targets (numeric source ids or identifying text) and
-validates that existing items and newly extracted goals remain represented unless the user
-retires them or a newer user directive explicitly replaces them. Replacement annotations must
-reference the earlier source id and have a newer user-order source. Kind and goal condition
-must remain represented; a silent model omission rejects the result. Failed consolidation
-keeps active old/raw orders and applies explicit user retirement targets, durably saved in the
+Consolidation applies recorded retirement targets (numeric source ids or identifying text, matched word
+by word) and validates coverage of existing items and newly extracted orders by the guard above, unless
+the user retires them or a newer user directive explicitly replaces them. Replacement annotations must
+reference the earlier source id and have a newer user-order source. Omitting an active previous order is
+a hard error that rejects the result.
+Failed consolidation keeps active old/raw orders and applies explicit user retirement targets, durably saved in the
 optional `retire` field beside `raw`; history remains append-only.
 Each pending retirement carries its user message id (`{i,retire:[targets]}`). Matching source ids
 or identifying text can remove only items whose newest source is not later than that retirement:
@@ -118,7 +123,7 @@ Persistent coverage/gate-scope, retention, access and default choices are policy
 single-command approvals.
 User-authorized replacement is distinct from model-owned expiry. An order is replaced only if
 the user says it changes/replaces it, or both cannot be followed at the same time. Overlap and
-broader goals are not replacements; ambiguous tension keeps both orders verbatim without an
+broader goals are not replacements; ambiguous tension keeps both orders as separate items without an
 interpretation for the turn model/owner to resolve. A truly incompatible goal can be replaced
 before completion, with the newer order's replacement annotation; unrelated goals stay.
 Empty extractions and retirement-only messages cannot be credited as new standing-order sources.

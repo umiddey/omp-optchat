@@ -82,9 +82,9 @@ Plain OMP sessions keep their recall either way; OMP still saves facts from OptC
 ## Standing orders ledger
 
 OptChat keeps standing goals, rules, constraints, prohibitions, preferences and decisions outside
-the summary tree, near-verbatim. They appear as an `<orders through="N">` block before `<chat>` on every
+the summary tree, restated in clear wording. They appear as an `<orders through="N">` block before `<chat>` on every
 request. New orders remain in recent view lines until the next view merge batch, when the ledger
-is consolidated: newest contradictory instructions replace earlier ones, and duplicates merge.
+is consolidated: orders are restated, duplicates and multi-message orders merge, and newest contradictory instructions replace earlier ones. A code guard checks that no condition, number, path or id is lost.
 The static prompt gives orders priority over conflicting summaries, but newer user messages can change or retire them and win. `zoom(id, 1)` gives context.
 This is a deliberate extension beyond Taelin's recipe, not a change to existing summary nodes.
 

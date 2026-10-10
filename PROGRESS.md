@@ -616,3 +616,18 @@ run2 4/91320/0/70; run3 4/91363/0/31; run4 4/91432/0/172 + 2/91432/1664/3; run5 
 4/81933/655/4. Sessions under `/home/ukd/.omp/agent/sessions/-tmp-glm-durable-cwd/` (removed with
 the temp dirs at cleanup). Commit: on `ledger-durable`; no install/push/merge/publish; the owner's
 live profile was never touched.
+
+## Restated orders — orders-restate (red tests e6e0f16, implementation d676dc5)
+
+CONSOLIDATE now restates orders in clear wording, merges an order spread over messages into one item
+and fixes typos and names, keeping every condition. Code guard (`missingTokens` in `src/orders.ts`)
+checks every previous and newly extracted order: a covering item of the same kind must share a source
+id and keep its must-keep tokens (numbers, paths, URLs, ids, code-ish tokens, condition words, names of
+5+ letters within edit distance 2). Gaps retry with the missing tokens listed (attempts 0 and 1); the
+last attempt substitutes the verbatim text for only the failing orders, with one warning. Hard error
+only when an active previous order is omitted. Text retire targets now match word by word, so a
+retired order stays retired after restating (needed by the BANANA regression tests). EXTRACT unchanged.
+`HANDOFF-ledger.md` removed. Tests: 131 pass, 0 fail, 15 files; `bunx tsc --noEmit` exit 0.
+Two existing tests were updated, not weakened: `test/recipe.test.ts` pins the new `OPTCHAT_PROMPT`
+tail, and the byte-bound fixture in `test/orders.test.ts` now keeps the condition word "Never push" so
+it exercises the byte limit rather than the guard.
