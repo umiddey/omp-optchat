@@ -226,6 +226,47 @@ test('migration preserves a finite goal done-condition while recovering its cond
   expect(warnings).toHaveLength(1);
  } finally { await o.close(); rmSync(dir, { recursive: true, force: true }); }
 });
+test('migration cannot silently omit an old order when another order shares its message id', async () => {
+ const dir = mkdtempSync(join(tmpdir(), 'orders-migrate-coverage-'));
+ const old = [
+  { text: 'Read every file in Where the rules live; work by /home/ukd/.omp/agent/AGENTS.md and ORCHESTRATOR_PLAYBOOK.md.', kind: 'rule' as const },
+  { text: 'The disk is the truth, not the handover text.', kind: 'rule' as const },
+ ];
+ writeFileSync(join(dir, 'orders.jsonl'), JSON.stringify({ i: 24, date: '2026-10-10', orders: old }) + '\n');
+ const warnings: string[] = [], o = new Orders(dir, consolidate, warning => warnings.push(warning));
+ try {
+  o.recordAll(new Map([[24, [{ said: 'Do not run a Gateforge full suite.', text: 'Do not run a Gateforge full suite.', kind: 'rule' }]]]));
+  for (const order of old) expect(o.records.get(24)?.orders).toContainEqual({ ...order, said: order.text });
+  expect(warnings).toHaveLength(2);
+ } finally { await o.close(); rmSync(dir, { recursive: true, force: true }); }
+});
+test('consolidation requires per-item content coverage, not an unrelated same-id item', async () => {
+ const dir = mkdtempSync(join(tmpdir(), 'orders-item-coverage-'));
+ const old = { text: 'The disk is the truth, not the handover text.', kind: 'rule' as const, from: [24], date: '2026-10-10' };
+ writeFileSync(join(dir, 'ledger.json'), JSON.stringify({ through: 24, items: [old] }));
+ let calls = 0; const warnings: string[] = [], retries: string[] = [];
+ const o = new Orders(dir, async input => { calls++; if (input.kind === 'consolidate' && input.retry) retries.push(input.retry); return [{ ...old, text: 'Do not run a Gateforge full suite.' }]; }, warning => warnings.push(warning));
+ try {
+  await o.batch(25);
+  expect(o.ledger.items).toContainEqual(old);
+  expect(calls).toBe(3); expect(warnings).toHaveLength(1);
+  for (const retry of retries) {
+   for (const word of ['disk', 'truth', 'handover', 'text']) expect(retry).toContain(`"${word}"`);
+   expect(retry).not.toContain('content coverage');
+  }
+ } finally { await o.close(); rmSync(dir, { recursive: true, force: true }); }
+});
+test('consolidation carries a completely omitted active order into the published fallback', async () => {
+ const dir = mkdtempSync(join(tmpdir(), 'orders-item-omitted-'));
+ const old = { text: 'The disk is the truth, not the handover text.', kind: 'rule' as const, from: [24], date: '2026-10-10' };
+ writeFileSync(join(dir, 'ledger.json'), JSON.stringify({ through: 24, items: [old] }));
+ const o = new Orders(dir, async () => [], () => {});
+ try {
+  await o.batch(25);
+  expect(o.ledger.items).toContainEqual(old);
+  expect(o.ledger.through).toBe(25);
+ } finally { await o.close(); rmSync(dir, { recursive: true, force: true }); }
+});
 test('D user retire record removes targeted item only at the next consolidation', async () => {
  const dir = mkdtempSync(join(tmpdir(), 'orders-retire-')); let o: Orders | undefined;
  const keep = { text: 'Always verify', kind: 'rule', from: [2], date: '2026-10-10' };

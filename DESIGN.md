@@ -108,6 +108,9 @@ previous and newly extracted order is covered by an item of its kind sharing one
 keeping its must-keep tokens: numbers, paths, URLs, ids and code-ish tokens; condition words (every, each, all, never, always, only, until, unless, except, before, after, must, without); all-caps acronyms, but not common words shouted in dictation (YOU HAVE TO); capitalised names that do not start a sentence, of five or more letters within edit distance 2. Interjections that dictation capitalises (Okay, Yeah) and one-letter capitals are not names. A name the summarizer heard in its view, shared with the restatement and not with the source, counts as kept, one per missing name. Plain lowercase words are not must-keep. A gap retries with the missing tokens listed; after the
 last attempt only the failing order falls back to its verbatim text, with one warning. `zoom(id, 1)`
 shows the user's exact words. Prompt contracts are measured by real-model replay; the guard is code.
+Coverage is per order, not merely per message id: one covering item must retain the hard tokens AND at least
+half of the source order's distinct lowercase content words (four or more letters, excluding a small
+stopword list; edit distance at most one). An unrelated item sharing the source id cannot satisfy coverage.
 
 Extraction records contain `{said,text,kind:"rule"|"goal",until?:string}` or
 `{retire:[text or numeric source ids]}`. Legacy string records and objects without `said` load as rules/typed
@@ -119,8 +122,8 @@ authority. Assistant status and model judgement are not.
 Consolidation applies recorded retirement targets (numeric source ids or identifying text, matched word
 by word) and validates coverage of existing items and newly extracted orders by the guard above, unless
 the user retires them or a newer user directive explicitly replaces them. Replacement annotations must
-reference the earlier source id and have a newer user-order source. Omitting an active previous order is
-a hard error that rejects the result.
+reference the earlier source id and have a newer user-order source. Omitting an active previous order
+cannot retire it: after guard retries it is carried into the published ledger verbatim.
 Failed consolidation keeps active old/raw orders and applies explicit user retirement targets, durably saved in the
 optional `retire` field beside `raw`; history remains append-only.
 Each pending retirement carries its user message id (`{i,retire:[targets]}`). Matching source ids
@@ -143,6 +146,9 @@ the user's words change them. The ordinary `said`→`text` guard applies, plus a
 restores lost goal metadata without dropping a newly recovered conditional permission. A migration appends `{i,date,orders,supersedes:true}` to
 `orders.jsonl`; the loader accepts exactly one later superseding record per id, never rewrites old lines,
 and uses the new record after restart. Normal newly written records always include `said`.
+Every old order also needs the same per-item hard-token/content-word coverage from one superseding order.
+If re-extraction omits or reclassifies it without that coverage, the superseding record carries it verbatim
+(`said = text = old text`, preserving kind/done-condition) and warns; extraction is not retirement authority.
 
 Migration alone does not publish a ledger or change its rendered bytes. Superseded ids become open again;
 the next view batch removes their old ledger source ids and consolidates their clean restatements, guarding

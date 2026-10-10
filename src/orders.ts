@@ -119,13 +119,27 @@ export function missingTokens(source: string, restated: string, context = ''): s
  return unmet.filter(keep => { if (keep.match !== 'name' || spare.length === 0) return true; spare.shift(); return false; }).map(keep => keep.text);
 }
 const wording = (order: StandingOrder) => [order.text, order.until].filter(Boolean).join(' ');
+const CONTENT_STOPWORDS: Record<string, true> = {
+ that: true, this: true, with: true, have: true, them: true, they: true, their: true, there: true,
+ from: true, when: true, then: true, your: true, should: true, would: true, could: true, will: true,
+ been: true, being: true, into: true, does: true, also: true, every: true, only: true, must: true,
+};
+/** One restatement must retain both hard tokens and at least half of this order's distinct content words. */
+function missingCoverage(source: string, restated: string): string[] {
+ const missing = missingTokens(source, restated);
+ const content = [...new Set((source.toLowerCase().match(/\p{L}{4,}/gu) ?? []).filter(word => !CONTENT_STOPWORDS[word]))];
+ const words = restated.toLowerCase().match(/\p{L}+/gu) ?? [];
+ const unmatched = content.filter(word => !words.some(candidate => candidate === word || distance(word, candidate) <= 1));
+ if ((content.length - unmatched.length) * 2 < content.length) missing.push(...unmatched);
+ return [...new Set(missing)];
+}
 interface Gap { source: OrderItem; omitted: boolean; missing: string[] }
-/** Each needed order must be restated by an item of its kind that shares one of its ids and keeps its must-keep tokens. */
+/** Each needed order needs one same-kind/shared-id item retaining hard tokens and its own content coverage. */
 function failing(next: readonly OrderItem[], needed: readonly OrderItem[]): Gap[] {
  return needed.flatMap((source): Gap[] => {
   const covering = next.filter(item => item.kind === source.kind && item.from.some(id => source.from.includes(id)));
   if (!covering.length) return [{ source, omitted: true, missing: [] }];
-  const missing = covering.map(item => missingTokens(wording(source), wording(item))).reduce((best, current) => current.length < best.length ? current : best);
+  const missing = covering.map(item => missingCoverage(wording(source), wording(item))).reduce((best, current) => current.length < best.length ? current : best);
   return missing.length ? [{ source, omitted: false, missing }] : [];
  });
 }
@@ -330,6 +344,14 @@ recordAll(scanned: ReadonlyMap<number, readonly OrderDirective[]>, context = '')
     } else record.orders.push(previous);
     this.warn(`Orders migration: preserved goal done-condition for msg ${i}: ${previous.until}`);
    }
+   if (supersedes) for (const previous of this.records.get(i)!.orders) {
+    if ('retire' in previous) continue;
+    const covered = record.orders.some(order => !('retire' in order) && order.kind === previous.kind
+     && !missingCoverage(wording(previous), wording(order)).length);
+    if (covered) continue;
+    record.orders.push({ ...previous, said: previous.text, text: previous.text });
+    this.warn(`Orders migration: carried uncovered order verbatim for msg ${i}: ${previous.text}`);
+   }
    appendJson(join(this.directory, 'orders.jsonl'), { ...record, ...(supersedes ? { supersedes: true } : {}) });
    if (supersedes) { this.legacy.delete(i); this.superseded.add(i); }
    this.records.set(i, record); this.unscanned.delete(i); this.backlog.delete(i); this.open.add(i);
@@ -368,8 +390,6 @@ recordAll(scanned: ReadonlyMap<number, readonly OrderDirective[]>, context = '')
     const fresh = payload.flatMap(r => r.orders.flatMap(order => 'retire' in order ? [] : [{ ...order, from: [r.i], date: r.date }])).filter(order => !retired(order, targets) && !replacedBy(order));
     const needed = [...kept, ...fresh];
     const gaps = failing(next, needed);
-    const omitted = gaps.find(gap => gap.omitted && kept.includes(gap.source));
-    if (omitted) throw Error(`Only user words can retire or replace an order; model omitted active order: ${omitted.source.text}`);
     if (gaps.length && attempt < 2) { retry = retryNote(gaps); continue; }
     const final = gaps.length ? substitute(next, needed, gaps) : next;
     if (failing(final, needed).length) throw Error('Verbatim fallback did not restore coverage.');
