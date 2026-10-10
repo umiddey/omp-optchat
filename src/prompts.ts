@@ -135,12 +135,14 @@ Only the user's words create, change or retire an order. Never retire on your ow
 
 /** The summarizer's extra task when a merge covers unscanned user messages: the line stays the summary; the orders follow it. */
 function scanTask(ids: readonly number[]) {
-  return `Also scan user messages ${ids.join(', ')} in <input> for standing orders, by the rules below.
+  return `Second task, after the line: scan user messages ${ids.join(', ')} in <input> for standing orders. The line above is written exactly as the task above asks, from the summary alone: do not use the words standing, one-off, retire, rule or goal in it, and do not classify messages there.
+
+Order rules (for the ORDERS part only):
 ${ORDER_RULES}
 
 ${ORDER_OUTPUT}
 
-After the line above, write a line "ORDERS:" and then one JSON object {"<id>": [orders...]} with an array for each of those ids ([] if none). The JSON is not part of the line and does not count toward its 512 bytes.`;
+Then, after the line, write a line "ORDERS:" and one JSON object {"<id>": [orders...]} with an array for each of those ids ([] if none). The JSON is not part of the line and does not count toward its 512 bytes.`;
 }
 
 /** The backfill task: history messages with their nearby assistant talk, batched. */

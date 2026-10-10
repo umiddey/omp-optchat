@@ -42,13 +42,13 @@ function directives(value: unknown): OrderDirective[] {
  if (!Array.isArray(value)) throw Error('Orders extraction must return an array.');
  return value.map((v: unknown) => typeof v === 'object' && v && 'retire' in v ? { retire: retireTargets(v.retire) } : standing(v));
 }
-/** The `{"<id>": [orders]}` object a scan or backfill returns: only ids that were asked for, each with valid orders. */
+/** The `{"<id>": [orders]}` object a scan or backfill returns: the asked-for ids, each with valid orders. Ids that were not asked for are ignored, so one stray id does not drop the rest. */
 export function orderMap(value: unknown, ids: readonly number[]): Map<number, OrderDirective[]> {
  if (typeof value !== 'object' || !value || Array.isArray(value)) throw Error('Orders must be an object keyed by message id.');
  const found = new Map<number, OrderDirective[]>();
  for (const [key, orders] of Object.entries(value)) {
   const i = Number(key);
-  if (!/^\d+$/.test(key) || !ids.includes(i)) throw Error(`Orders name message ${key}, which was not asked for.`);
+  if (!/^\d+$/.test(key) || !ids.includes(i)) continue;
   found.set(i, directives(orders));
  }
  return found;
