@@ -76,18 +76,27 @@ case, message 24's full PM goal shortened at 16+16 and disappeared at 0+32. A re
 135 compactions retained only 16/30 lost orders, and 0/18 full PM goals, even with the exact
 recipe prompt and Haiku xhigh. Prompt tuning cannot provide durable standing-order storage.
 
-`src/orders.ts` therefore owns an independent append-only extraction log and atomic ledger.
-Every genuine user log entry (excluding any `[customType] ` shown-message prefix) gets one
-background model extraction, including an empty-array record. The profile compactor model/effort
-is reused; failures retry with the compactor's ten-second availability policy. Duplicate ids
-are never appended. Backfill extracts missing historical ids on session start without blocking
-a normal turn, then creates the first ledger once; saved ledgers are never recomputed on restart.
+`src/orders.ts` therefore owns an append-only orders log and an atomic ledger. This is our extension: it
+costs one model call fewer per user message, because standing orders are no longer extracted by a
+separate per-message call. Each user log entry (excluding any `[customType] ` shown-message prefix) is
+scanned by a summarizer call that already reads it: a user message longer than 512 bytes by its own leaf
+call, a shorter one by the first merge call whose input contains its verbatim text. The summarizer task
+text is the recipe's compaction task, verbatim, with an appended section only when the node covers
+unscanned user messages. That section lists their ids and asks for a final `ORDERS:` line holding one
+JSON object `{"<id>": [orders...]}`, with empty arrays allowed. The 512-byte limit and the `tooLong`
+retries apply to the line before `ORDERS:` only. Orders come from the accepted reply, else from the first
+reply in the same call with valid ORDERS JSON; if none is valid, the messages stay unscanned for the next
+covering call. The summarizer sees the 16–32 KB compaction view around each message, so speech-to-text
+slips are resolved from context. Each order is `{said, text, kind, until?}`: `said` is the user's words and
+`text` a clean restatement. Records are written before the node that covers them is appended, so restarts
+keep them. The former per-message path is kept only for one-time history backfill (`EXTRACT_ORDERS`,
+batched up to 20 messages with ≤2 KB of neighbouring talk as context), covering ids already built into
+nodes before this version. Saved ledgers are never recomputed on restart.
 
-Extraction snapshots the immediately preceding assistant reply before queuing the user entry.
-Consecutive `talk` chunks are joined; at most the final 4000 UTF-8 bytes are kept, advancing the
-slice to a complete character boundary. Live logging and historical backfill use the same path;
-later replies cannot mutate queued extraction context. A user choice that sets a lasting
-goal/rule/policy may resolve its reference as `"user's words" (chosen: option text from reply)`.
+Consolidation (at a view batch) restates each order as one clear, self-contained sentence or two, merging an
+order spread over several messages into one item and fixing typos and names (`gatefoge` → `Gateforge`).
+Consolidation and backfill use `medium` thinking regardless of the compactor's setting. A user choice that sets a
+lasting goal/rule/policy may resolve its reference as `"user's words" (chosen: option text from reply)`.
 Context never supplies an order by itself. Task-scoped assignments, operations and deployment
 approvals remain excluded: standing orders apply beyond the current task.
 

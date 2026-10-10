@@ -88,19 +88,23 @@ is consolidated: orders are restated, duplicates and multi-message orders merge,
 The static prompt gives orders priority over conflicting summaries, but newer user messages can change or retire them and win. `zoom(id, 1)` gives context.
 This is a deliberate extension beyond Taelin's recipe, not a change to existing summary nodes.
 
-No extra config: extraction and consolidation use `compactor`'s model and effort. Extraction runs
-in the background (up to eight workers), ignores shown custom-message tags, and records even
-messages containing no standing order. Existing profiles backfill missing ids once in the background;
-their first ledger appears at a subsequent turn start after completion. Normal turns do not wait
-for extraction; a view rewrite waits for its consolidation with the usual working message.
+No extra config: orders are scanned by the summarizer calls that already run, using `compactor`'s model
+and effort, so a user message costs one model call fewer than before. Each summarizer call that covers
+unscanned user messages gets a short appended task section and returns an `ORDERS:` JSON line beside its
+summary; the summary itself keeps the 512-byte rule. Because the summarizer reads the surrounding view,
+speech-to-text slips such as "stale scale" or "gatefoge" are resolved from context. Shown custom-message
+tags are ignored, and messages with no standing order are recorded as empty. Existing profiles backfill
+missing ids once in the background, batched; their first ledger appears at a subsequent turn start after
+completion. Normal turns do not wait for scanning; a view rewrite waits for its consolidation with the
+usual working message.
 
 Standing means an instruction keeps applying beyond the current task. One-off agent assignments,
 action approvals, pushing a particular change, or installing/restarting it are not standing orders.
-To understand a short answer that chooses a lasting policy, extraction also receives the preceding
-assistant reply (consecutive reply chunks, last 4,000 UTF-8 bytes). It may resolve the user's chosen
-option as `"user's words" (chosen: option text)`, but the reply is never itself a source of orders.
-Consolidation keeps user wording rather than interpreting it; only resolved-choice annotations
-and `(replaces msg N)` are allowed, not explanatory notes or spelling corrections.
+To understand a short answer that chooses a lasting policy, the summarizer also sees the preceding
+assistant reply in the view. It may resolve the user's chosen option as `"user's words" (chosen: option
+text)`, but the reply is never itself a source of orders. Each order keeps the user's words (`said`) and a
+restated `text`; consolidation restates clearly, fixes typos and names, and keeps user wording rather than
+interpreting it, so it adds no explanatory notes beyond resolved-choice annotations and `(replaces msg N)`.
 
 Only the user's words create, change or retire an order. `rule` means how to work with no end;
 `goal` means something to achieve, with `until` holding its done-condition in the user's words
@@ -121,7 +125,8 @@ inventing one. The `through` header changes only with ledger publication.
 
 Profile files:
 - `orders.jsonl`: append-only, flushed `{i,date,orders:[directives]}`. Directives are
-  `{text,kind:"rule"|"goal",until?:string}` or `{retire:[text or numeric source ids]}`.
+  `{said,text,kind:"rule"|"goal",until?:string}` (`said` is the user's words, `text` the restatement) or
+  `{retire:[text or numeric source ids]}`.
   Legacy string entries load as `{text,kind:"rule"}` without rewriting the file. Read it as JSONL,
   or use `jq -c 'select(.orders | length > 0)' ~/.omp/optchat/main/orders.jsonl`.
 - `ledger.json`: atomic `{through,items:[{text,kind,until?,from:[ids],date}]}` snapshot, loaded without
