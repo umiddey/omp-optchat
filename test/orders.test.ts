@@ -38,7 +38,7 @@ test('failed consolidation renders old ledger plus raw unconsolidated orders', a
  await fixture(async o => { o.append(entry(0)); await o.batch(0); o.append(entry(1, 'Always verify')); await o.batch(1); expect(o.render()).toContain('0 [rule] (2026-10-10): Never push'); expect(o.render()).toContain('1 [rule] (2026-10-10): Always verify'); }, async task => task.kind === 'extract' ? [task.entry.text] : task.through === 0 ? [{ text: 'Never push', from: [0], date: '2026-10-10' }] : Promise.reject(Error('offline')));
 });
 test('16000 UTF-8 byte bound enforced without dropping orders', async () => {
- await fixture(async (o, dir) => { o.append(entry(0)); await o.batch(0); expect(o.render()).toContain('Never push'); expect(JSON.parse(readFileSync(join(dir, 'ledger.json'), 'utf8')).through).toBe(-1); }, async task => task.kind === 'extract' ? ['Never push'] : [{ text: '界'.repeat(6000), from: [0], date: '2026-10-10' }]);
+ await fixture(async (o, dir) => { o.append(entry(0)); await o.batch(0); expect(o.render()).toContain('Never push'); expect(JSON.parse(readFileSync(join(dir, 'ledger.json'), 'utf8')).through).toBe(-1); }, async task => task.kind === 'extract' ? ['Never push'] : [{ text: 'Never push ' + '界'.repeat(6000), from: [0], date: '2026-10-10' }]);
 });
 test('backfill missing ids once and creates first ledger', async () => {
  let extractions = 0;

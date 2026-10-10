@@ -91,7 +91,8 @@ export function createOrderTask(registry: ModelRegistry, choice: () => ModelChoi
   return async (input, signal) => {
     const selected = choice(), model = registry.find(selected.provider, selected.model);
     if (!model) throw Error(`Compactor model unavailable: ${selected.provider}/${selected.model}`);
-    const messages: Message[] = [{ role: 'user', content: JSON.stringify(input), timestamp: Date.now() }];
+    const note = input.kind === 'consolidate' && input.retry ? `${input.retry}\n` : '';
+    const messages: Message[] = [{ role: 'user', content: `${note}${JSON.stringify(input.kind === 'consolidate' ? { ...input, retry: undefined } : input)}`, timestamp: Date.now() }];
     const reply = await streamSimple(model, {
       systemPrompt: [input.kind === 'extract' ? EXTRACT_ORDERS : CONSOLIDATE_ORDERS], messages,
     }, { apiKey: await registry.getApiKey(model), sessionId: 'optchat-orders', reasoning: reasoningFor(model, selected.thinking),

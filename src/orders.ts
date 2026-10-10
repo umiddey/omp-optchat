@@ -12,7 +12,7 @@ export interface ExtractedOrders { i: number; date: string; orders: OrderDirecti
 export interface OrderItem extends StandingOrder { from: number[]; date: string }
 export interface Ledger { through: number; items: OrderItem[] }
 export interface OrderExtraction { kind: 'extract'; entry: Entry; context: string }
-export type OrderInput = OrderExtraction | { kind: 'consolidate'; ledger: Ledger; records: ExtractedOrders[]; through: number };
+export type OrderInput = OrderExtraction | { kind: 'consolidate'; ledger: Ledger; records: ExtractedOrders[]; through: number; retry?: string };
 export type OrderTask = (input: OrderInput, signal: AbortSignal) => Promise<unknown>;
 const eligible = (entry: Entry) => entry.kind === 'user' && !/^\[[^\]\r\n]+\] /.test(entry.text);
 function standing(value: unknown): StandingOrder {
@@ -32,9 +32,73 @@ function directives(value: unknown): OrderDirective[] {
  if (!Array.isArray(value)) throw Error('Orders extraction must return an array.');
  return value.map((v: unknown) => typeof v === 'object' && v && 'retire' in v ? { retire: retireTargets(v.retire) } : standing(v));
 }
+/** A text retire target retires an order when each of its words appears in the order's text, in any order. */
+function mentions(text: string, phrase: string) {
+ const words = new Set(text.toLowerCase().match(/\p{L}+/gu) ?? []);
+ return (phrase.toLowerCase().match(/\p{L}+/gu) ?? []).every(word => words.has(word));
+}
 function retired(item: OrderItem, events: readonly RetirementEvent[]) {
  return events.some(event => Math.max(...item.from) <= event.i && event.retire.some(target =>
-  typeof target === 'number' ? item.from.includes(target) : item.text.toLowerCase().includes(target.toLowerCase())));
+  typeof target === 'number' ? item.from.includes(target) : mentions(item.text, target)));
+}
+const CONDITIONS: Record<string, true> = { every: true, each: true, all: true, any: true, never: true, always: true, only: true, until: true, unless: true, except: true, before: true, after: true, must: true, without: true };
+/** Must-keep token of a source order: numbers, paths, URLs, ids and code-ish tokens match exactly; condition words match whole words; names of 5+ letters tolerate edit distance 2. */
+interface Keep { text: string; match: 'exact' | 'word' | 'name' }
+function distance(a: string, b: string) {
+ let row = Array.from({ length: b.length + 1 }, (_, j) => j);
+ for (let i = 1; i <= a.length; i++) {
+  const next = [i];
+  for (let j = 1; j <= b.length; j++) next[j] = Math.min(row[j] + 1, next[j - 1] + 1, row[j - 1] + (a[i - 1] === b[j - 1] ? 0 : 1));
+  row = next;
+ }
+ return row[b.length];
+}
+function classify(token: string): Keep[] {
+ if (!/[\p{L}\d]/u.test(token)) return [];
+ if (token.includes('/') && !/[.:~]|^\//.test(token)) return token.split('/').flatMap(classify);
+ if (/[._:\/\-\d]/.test(token)) return [{ text: token, match: 'exact' }];
+ const found: Keep[] = [];
+ for (const run of token.match(/\p{L}+/gu) ?? []) {
+  if (CONDITIONS[run.toLowerCase()] === true) found.push({ text: run, match: 'word' });
+  else if (run.length >= 5) found.push({ text: run, match: 'name' });
+ }
+ return found;
+}
+function keeps(source: string): Keep[] {
+ return source.split(/\s+/).flatMap((raw): Keep[] => {
+  const token = raw.replace(/^[`"'(\[{*]+|[`"')\]}.,;:!?*]+$/g, '');
+  return raw.includes('`') && /[\p{L}\d]/u.test(token) ? [{ text: token, match: 'exact' }] : classify(token);
+ });
+}
+function holds(keep: Keep, restated: string, words: readonly string[]) {
+ if (keep.match === 'exact') return new RegExp(`(?<![\\p{L}\\d])${keep.text.replace(/[.*+?^${}()|[\]\\\/]/g, '\\$&')}(?![\\p{L}\\d])`, 'u').test(restated);
+ const word = keep.text.toLowerCase();
+ return keep.match === 'word' ? words.includes(word) : words.some(v => v === word || distance(v, word) <= 2);
+}
+/** Must-keep tokens of `source` that `restated` no longer carries; the guard and the retry note both use it. */
+export function missingTokens(source: string, restated: string): string[] {
+ const words = restated.toLowerCase().match(/\p{L}+/gu) ?? [];
+ return [...new Set(keeps(source).filter(keep => !holds(keep, restated, words)).map(keep => keep.text))];
+}
+const wording = (order: StandingOrder) => [order.text, order.until].filter(Boolean).join(' ');
+interface Gap { source: OrderItem; omitted: boolean; missing: string[] }
+/** Each needed order must be restated by an item of its kind that shares one of its ids and keeps its must-keep tokens. */
+function failing(next: readonly OrderItem[], needed: readonly OrderItem[]): Gap[] {
+ return needed.flatMap((source): Gap[] => {
+  const covering = next.filter(item => item.kind === source.kind && item.from.some(id => source.from.includes(id)));
+  if (!covering.length) return [{ source, omitted: true, missing: [] }];
+  const missing = covering.map(item => missingTokens(wording(source), wording(item))).reduce((best, current) => current.length < best.length ? current : best);
+  return missing.length ? [{ source, omitted: false, missing }] : [];
+ });
+}
+function retryNote(gaps: readonly Gap[]) {
+ return `These orders lost wording while being restated. Restate each one again, keeping every listed word, number, path and id; typos and names may be fixed.\n${gaps.map(gap => `msg ${gap.source.from.join(', ')} "${wording(gap.source)}": ${gap.omitted ? 'no item covers it' : `missing ${gap.missing.map(t => JSON.stringify(t)).join(', ')}`}`).join('\n')}`;
+}
+/** Per failing order its verbatim text replaces it, and its ids leave every model item that carried them. */
+function substitute(next: readonly OrderItem[], gaps: readonly Gap[]): OrderItem[] {
+ const ids = new Set(gaps.flatMap(gap => gap.source.from));
+ const remaining = next.map(item => ({ ...item, from: item.from.filter(id => !ids.has(id)) })).filter(item => item.from.length);
+ return [...remaining, ...gaps.map(gap => ({ ...gap.source }))];
 }
 function items(value: unknown): OrderItem[] {
  if (!Array.isArray(value)) throw Error('Ledger must be an array.');
@@ -173,31 +237,34 @@ export class Orders {
    const records = [...this.records.values()].filter(r => r.i > this.ledger.through && r.i <= through).sort((a, b) => a.i - b.i);
    if (through <= this.ledger.through) return;
    const targets = records.flatMap(r => r.orders.flatMap(order => 'retire' in order ? [{ i: r.i, retire: order.retire }] : []));
+   let retry: string | undefined;
    for (let attempt = 0; attempt < 3; attempt++) try {
-    const next = items(await this.task({ kind: 'consolidate', ledger: this.ledger, records, through }, this.controller.signal)).filter(item => !retired(item, targets));
-    const goals = records.flatMap(r => r.orders.flatMap(order => !('retire' in order) && order.kind === 'goal' ? [{ ...order, from: [r.i], date: r.date }] : []));
-    for (const previous of [...this.ledger.items, ...goals]) {
-     if (retired(previous, targets)) continue;
-     const retained = next.some(item => item.from.some(id => previous.from.includes(id))
-      && item.kind === previous.kind
-      && (item.text.includes(previous.text) || (previous.kind === 'goal' && previous.until !== undefined && item.until?.includes(previous.until))));
-     const replaced = next.some(item => item.from.some(id => records.some(r => r.i === id && r.i > Math.max(...previous.from) && r.orders.some(order => !('retire' in order))))
-      && previous.from.some(id => item.text.includes(`(replaces msg ${id})`)));
-     if (!retained && !replaced) throw Error(`Only user words can retire or replace an order; model omitted active order: ${previous.text}`);
+    const next = items(await this.task({ kind: 'consolidate', ledger: this.ledger, records, through, retry }, this.controller.signal)).filter(item => !retired(item, targets));
+    const replacedBy = (previous: OrderItem) => next.some(item => item.from.some(id => records.some(r => r.i === id && r.i > Math.max(...previous.from) && r.orders.some(order => !('retire' in order))))
+     && previous.from.some(id => item.text.includes(`(replaces msg ${id})`)));
+    const kept = this.ledger.items.filter(item => !retired(item, targets) && !replacedBy(item));
+    const fresh = records.flatMap(r => r.orders.flatMap(order => 'retire' in order ? [] : [{ ...order, from: [r.i], date: r.date }])).filter(order => !retired(order, targets));
+    const needed = [...kept, ...fresh];
+    const gaps = failing(next, needed);
+    const omitted = gaps.find(gap => gap.omitted && kept.includes(gap.source));
+    if (omitted) throw Error(`Only user words can retire or replace an order; model omitted active order: ${omitted.source.text}`);
+    if (gaps.length && attempt < 2) { retry = retryNote(gaps); continue; }
+    const final = gaps.length ? substitute(next, gaps) : next;
+    if (failing(final, needed).length) throw Error('Verbatim fallback did not restore coverage.');
+    if (gaps.length) this.warn(`Orders consolidation: kept the verbatim wording of ${gaps.length} order(s) that lost conditions after retries (msg ${gaps.map(gap => gap.source.from.join(', ')).join('; ')}).`);
+    const dates = new Map<number, string>();
+    for (const item of this.ledger.items) for (const id of item.from) dates.set(id, item.date);
+    for (const r of records) if (r.orders.some(order => !('retire' in order))) dates.set(r.i, r.date);
+    for (const item of final) {
+     if (item.from.some(id => !dates.has(id))) throw Error('Ledger invented a source id.');
+     item.date = dates.get(Math.max(...item.from))!;
     }
-    const sources = new Map<number, string>();
-    for (const item of this.ledger.items) for (const id of item.from) sources.set(id, item.date);
-    for (const r of records) if (r.orders.some(order => !('retire' in order))) sources.set(r.i, r.date);
-    for (const item of next) {
-     if (item.from.some(id => !sources.has(id))) throw Error('Ledger invented a source id.');
-     item.date = sources.get(Math.max(...item.from))!;
-    }
-    if (Buffer.byteLength(renderOrders(next, through), 'utf8') > ORDER_LIMIT) throw Error('Ledger exceeds 16000 UTF-8 bytes; combine related orders without dropping any.');
+    if (Buffer.byteLength(renderOrders(final, through), 'utf8') > ORDER_LIMIT) throw Error('Ledger exceeds 16000 UTF-8 bytes; combine related orders without dropping any.');
     // A newer batch may already be checkpointed; keep its marker when this older consolidation lands first.
     const pendingAgain = this.pendingThrough !== undefined && this.pendingThrough > through ? { pending: this.pendingThrough } : {};
     if (this.pendingThrough === through) this.pendingThrough = undefined;
-    const saved = { through, items: next, ...pendingAgain };
-    atomicWrite(join(this.directory, 'ledger.json'), JSON.stringify(saved)); this.ledger = { through, items: next }; this.raw = []; this.retire = []; this.loaded = true; return;
+    const saved = { through, items: final, ...pendingAgain };
+    atomicWrite(join(this.directory, 'ledger.json'), JSON.stringify(saved)); this.ledger = { through, items: final }; this.raw = []; this.retire = []; this.loaded = true; return;
    } catch (error) { if (this.stopped) return; this.warn(`Orders consolidation: ${String(error)}`); }
    this.raw = records.flatMap(r => r.orders.flatMap(order => 'retire' in order ? [] : [{ ...order, from: [r.i], date: r.date }]));
    this.retire = targets;
