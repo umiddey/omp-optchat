@@ -317,9 +317,11 @@ export class Memory {
     // A literal node summarizes nothing, so it scans nothing; a compressed node scans the unscanned user messages in its span.
     let text = source;
     let orders: ReadonlyMap<number, readonly OrderDirective[]> | undefined;
+    let context = '';
     if (bytes(source) > NODE) {
       const scan = this.orders?.scan(start(part), end(part) - 1) ?? [];
-      const reply = await this.compress({ context: this.compactionView(part), source: mergeSource, part, ...(scan.length ? { scan } : {}) }, this.controller.signal);
+      context = this.compactionView(part);
+      const reply = await this.compress({ context, source: mergeSource, part, ...(scan.length ? { scan } : {}) }, this.controller.signal);
       const result = typeof reply === 'string' ? { text: reply } : reply;
       text = result.text.trim();
       orders = result.orders;
@@ -327,7 +329,7 @@ export class Memory {
     if (this.stopped) return;
     if (!text) throw new Error('Compactor returned an empty summary.');
     // Orders are recorded before the node that scanned them is written, so a restart keeps them.
-    if (orders) this.orders?.recordAll(orders);
+    if (orders) this.orders?.recordAll(orders, context);
     const node = { ...part, text, size: lineBytes(text) };
     // A failed node write fails the build, which is retried.
     const written = this.enqueue(() => this.store.appendNode(node), error => { throw error; });

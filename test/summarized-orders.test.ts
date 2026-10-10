@@ -102,3 +102,15 @@ test('(g) history backfill sends at most 20 messages per call, and new messages 
 });
 
 afterAll(() => { for (const dir of dirs) rmSync(dir, { recursive: true, force: true }); });
+test('(i) a name the summarizer heard in its view counts as kept; without that view the verbatim words fall back', async () => {
+  const o = new Orders(scratch(), async () => [], () => {}, 10);
+  try {
+    o.append(entry(0, 'Send it to Rappov'));
+    o.append(entry(1, 'Send it to Rappov'));
+    const order = { said: 'Send it to Rappov', text: 'Send it to Gateforge', kind: 'rule' as const };
+    o.recordAll(new Map([[0, [order]]]), 'user: Send it to Rappov\nassistant: The Gateforge repo is ready');
+    o.recordAll(new Map([[1, [order]]]));
+    assert.deepEqual(o.records.get(0)?.orders, [{ said: 'Send it to Rappov', text: 'Send it to Gateforge', kind: 'rule' }]);
+    assert.deepEqual(o.records.get(1)?.orders, [{ said: 'Send it to Rappov', text: 'Send it to Rappov', kind: 'rule' }]);
+  } finally { await o.close(); }
+});

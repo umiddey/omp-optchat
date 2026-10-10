@@ -64,7 +64,11 @@ function retired(item: OrderItem, events: readonly RetirementEvent[]) {
  return events.some(event => Math.max(...item.from) <= event.i && event.retire.some(target =>
   typeof target === 'number' ? item.from.includes(target) : mentions(item.text, target)));
 }
-const CONDITIONS: Record<string, true> = { every: true, each: true, all: true, any: true, never: true, always: true, only: true, until: true, unless: true, except: true, before: true, after: true, must: true, without: true };
+const CONDITIONS: Record<string, true> = { every: true, each: true, all: true, never: true, always: true, only: true, until: true, unless: true, except: true, before: true, after: true, must: true, without: true };
+/** Common words that are shouted in dictation (YOU HAVE TO), not acronyms. */
+const SHOUTED: Record<string, true> = { you: true, have: true, to: true, the: true, and: true, for: true, not: true, are: true, this: true, that: true, with: true, from: true, but: true, it: true, is: true, be: true, so: true, my: true, me: true, we: true, he: true, she: true, do: true, on: true, in: true, of: true, at: true, by: true, or: true, as: true, an: true, if: true, go: true, get: true, out: true, up: true, our: true, your: true, they: true, them: true, their: true, what: true, when: true, who: true };
+/** Interjections and fillers that dictation capitalises mid-sentence; they are not names. */
+const DICTATION: Record<string, true> = { okay: true, ok: true, yeah: true, yes: true, yep: true, so: true, well: true, right: true, like: true, um: true, uh: true, hey: true, hi: true, sure: true, fine: true, cool: true, alright: true, thanks: true, please: true };
 /** Must-keep token of a source order: numbers, paths, URLs, ids and code-ish tokens match exactly; condition words and all-caps acronyms match whole words, case-insensitively; a capitalised word that does not start a sentence is a name (5+ letters tolerate edit distance 2). Plain lowercase words are never must-keep. */
 interface Keep { text: string; match: 'exact' | 'word' | 'name' }
 function distance(a: string, b: string) {
@@ -82,9 +86,9 @@ function classify(token: string, start: boolean): Keep[] {
  if (/[._:\/\-\d]/.test(token)) return [{ text: token, match: 'exact' }];
  const found: Keep[] = [];
  for (const run of token.match(/\p{L}+/gu) ?? []) {
-  const acronym = run.length >= 2 && run === run.toUpperCase() && /\p{Lu}/u.test(run);
+  const acronym = run.length >= 2 && run === run.toUpperCase() && /\p{Lu}/u.test(run) && SHOUTED[run.toLowerCase()] !== true;
   if (CONDITIONS[run.toLowerCase()] === true || acronym) found.push({ text: run, match: 'word' });
-  else if (!start && /\p{Lu}/u.test(run)) found.push({ text: run, match: run.length >= 5 ? 'name' : 'word' });
+  else if (!start && run.length >= 2 && /\p{Lu}/u.test(run) && DICTATION[run.toLowerCase()] !== true && SHOUTED[run.toLowerCase()] !== true) found.push({ text: run, match: run.length >= 5 ? 'name' : 'word' });
  }
  return found;
 }
@@ -101,10 +105,15 @@ function holds(keep: Keep, restated: string, words: readonly string[]) {
  const word = keep.text.toLowerCase();
  return keep.match === 'word' ? words.includes(word) : words.some(v => v === word || distance(v, word) <= 2);
 }
-/** Must-keep tokens of `source` that `restated` no longer carries; the guard and the retry note both use it. */
-export function missingTokens(source: string, restated: string): string[] {
+/** Must-keep tokens of `source` that `restated` no longer carries; the guard and the retry note both use it. A capitalised word
+ * the restatement shares with the context (and not with the source) resolves one missing name: the summarizer heard it in context. */
+export function missingTokens(source: string, restated: string, context = ''): string[] {
  const words = restated.toLowerCase().match(/\p{L}+/gu) ?? [];
- return [...new Set(keeps(source).filter(keep => !holds(keep, restated, words)).map(keep => keep.text))];
+ const unmet = [...new Map(keeps(source).filter(keep => !holds(keep, restated, words)).map((keep): [string, Keep] => [keep.text, keep])).values()];
+ const sourceNames = new Set(source.match(/\p{Lu}\p{L}*/gu) ?? []);
+ const contextNames = new Set(context.match(/\p{Lu}\p{L}*/gu) ?? []);
+ const spare = (restated.match(/\p{Lu}\p{L}*/gu) ?? []).filter(word => !sourceNames.has(word) && contextNames.has(word));
+ return unmet.filter(keep => { if (keep.match !== 'name' || spare.length === 0) return true; spare.shift(); return false; }).map(keep => keep.text);
 }
 const wording = (order: StandingOrder) => [order.text, order.until].filter(Boolean).join(' ');
 interface Gap { source: OrderItem; omitted: boolean; missing: string[] }
@@ -127,8 +136,8 @@ function substitute(next: readonly OrderItem[], needed: readonly OrderItem[], ga
  return [...remaining, ...needed.filter(source => failing(remaining, [source]).length).map(source => ({ ...source, text: source.said ?? source.text }))];
 }
 /** A guard failure sets the text to the user's words; a retirement has no words to guard. */
-function guarded(order: OrderDirective): OrderDirective {
- if ('retire' in order || order.said === undefined || !missingTokens(order.said, order.text).length) return order;
+function guarded(order: OrderDirective, context: string): OrderDirective {
+ if ('retire' in order || order.said === undefined || !missingTokens(order.said, order.text, context).length) return order;
  return { ...order, text: order.said };
 }
 /** What the consolidation model sees: restatements only, never the verbatim words. */
@@ -264,13 +273,14 @@ export class Orders {
  scan(from: number, to: number) {
   return [...this.unscanned.keys()].filter(i => i >= from && i <= to).sort((a, b) => a - b);
  }
- /** Records what a summarizer call or the backfill read for each message, before the node that call built is written. A
-  * restatement that loses a must-keep token of the user's words falls back to those words. */
- recordAll(scanned: ReadonlyMap<number, readonly OrderDirective[]>) {
+/** Records what a summarizer call or the backfill read for each message, before the node that call built is written. A
+ * restatement that loses a must-keep token of the user's words falls back to those words; the context (the call's view) lets a
+ * name the summarizer heard there count as kept. */
+recordAll(scanned: ReadonlyMap<number, readonly OrderDirective[]>, context = '') {
   for (const [i, orders] of scanned) {
    const date = this.unscanned.get(i);
    if (this.records.has(i) || date === undefined) continue;
-   const record: ExtractedOrders = { i, date, orders: orders.map(guarded) };
+  const record: ExtractedOrders = { i, date, orders: orders.map(order => guarded(order, context)) };
    appendJson(join(this.directory, 'orders.jsonl'), record);
    this.records.set(i, record); this.unscanned.delete(i); this.backlog.delete(i); this.open.add(i);
   }

@@ -105,8 +105,7 @@ over several messages into one item and fixing typos and names (`gatefoge` → `
 interpret, speculate or add commentary; its only allowed annotations are `(replaces msg N)` and the
 already-extracted `(chosen: ...)` text. Restating never drops a condition: code checks that every
 previous and newly extracted order is covered by an item of its kind sharing one of its source ids,
-keeping its must-keep tokens (numbers, paths, URLs, ids, code-ish tokens, condition words, all-caps
-acronyms, and capitalised names that do not start a sentence; names of five or more letters within edit distance 2; plain lowercase words are not must-keep). A gap retries with the missing tokens listed; after the
+keeping its must-keep tokens: numbers, paths, URLs, ids and code-ish tokens; condition words (every, each, all, never, always, only, until, unless, except, before, after, must, without); all-caps acronyms, but not common words shouted in dictation (YOU HAVE TO); capitalised names that do not start a sentence, of five or more letters within edit distance 2. Interjections that dictation capitalises (Okay, Yeah) and one-letter capitals are not names. A name the summarizer heard in its view, shared with the restatement and not with the source, counts as kept, one per missing name. Plain lowercase words are not must-keep. A gap retries with the missing tokens listed; after the
 last attempt only the failing order falls back to its verbatim text, with one warning. `zoom(id, 1)`
 shows the user's exact words. Prompt contracts are measured by real-model replay; the guard is code.
 
