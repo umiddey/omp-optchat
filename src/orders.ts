@@ -4,25 +4,35 @@ import type { Entry } from './memory.ts';
 import { appendJson, atomicWrite } from './store.ts';
 
 export const ORDER_LIMIT = 16_000;
-export interface StandingOrder { text: string; kind: 'rule' | 'goal'; until?: string }
+const BACKFILL_BATCH = 20;
+const BACKFILL_ATTEMPTS = 3;
+const TALK_LIMIT = 2048;
+/** `said` is the user's words; `text` is the restatement the ledger and the turn model read. Ledger items carry `text` only. */
+export interface StandingOrder { said?: string; text: string; kind: 'rule' | 'goal'; until?: string }
 export interface Retirement { retire: (string | number)[] }
 interface RetirementEvent extends Retirement { i: number }
 export type OrderDirective = StandingOrder | Retirement;
 export interface ExtractedOrders { i: number; date: string; orders: OrderDirective[] }
 export interface OrderItem extends StandingOrder { from: number[]; date: string }
 export interface Ledger { through: number; items: OrderItem[] }
-export interface OrderExtraction { kind: 'extract'; entry: Entry; context: string }
-export type OrderInput = OrderExtraction | { kind: 'consolidate'; ledger: Ledger; records: ExtractedOrders[]; through: number; retry?: string };
+/** A history message for the one-time backfill, with the assistant's talk before and after it for references. */
+export interface BackfillItem { i: number; text: string; before?: string; after?: string }
+export type OrderInput =
+ | { kind: 'consolidate'; ledger: Ledger; records: ExtractedOrders[]; through: number; retry?: string }
+ | { kind: 'backfill'; items: BackfillItem[] };
 export type OrderTask = (input: OrderInput, signal: AbortSignal) => Promise<unknown>;
 const eligible = (entry: Entry) => entry.kind === 'user' && !/^\[[^\]\r\n]+\] /.test(entry.text);
 function standing(value: unknown): StandingOrder {
- if (typeof value === 'string' && value.trim()) return { text: value.trim(), kind: 'rule' };
+ if (typeof value === 'string' && value.trim()) return { said: value.trim(), text: value.trim(), kind: 'rule' };
  if (typeof value !== 'object' || !value || !('text' in value) || typeof value.text !== 'string' || !value.text.trim()) throw Error('Invalid standing order.');
  const kind = 'kind' in value ? value.kind : 'rule';
  if (kind !== 'rule' && kind !== 'goal') throw Error('Invalid order kind.');
  const until = 'until' in value ? value.until : undefined;
  if (until !== undefined && (kind !== 'goal' || typeof until !== 'string' || !until.trim())) throw Error('Invalid goal done-condition.');
- return { text: value.text.trim(), kind, ...(typeof until === 'string' ? { until: until.trim() } : {}) };
+ const text = value.text.trim();
+ // A record written before `said` existed reads as its own words.
+ const said = 'said' in value && typeof value.said === 'string' && value.said.trim() ? value.said.trim() : text;
+ return { said, text, kind, ...(typeof until === 'string' ? { until: until.trim() } : {}) };
 }
 function retireTargets(value: unknown): (string | number)[] {
  if (!Array.isArray(value) || !value.length || !value.every(v => typeof v === 'string' ? !!v.trim() : Number.isSafeInteger(v) && v >= 0)) throw Error('Invalid retirement targets.');
@@ -31,6 +41,17 @@ function retireTargets(value: unknown): (string | number)[] {
 function directives(value: unknown): OrderDirective[] {
  if (!Array.isArray(value)) throw Error('Orders extraction must return an array.');
  return value.map((v: unknown) => typeof v === 'object' && v && 'retire' in v ? { retire: retireTargets(v.retire) } : standing(v));
+}
+/** The `{"<id>": [orders]}` object a scan or backfill returns: only ids that were asked for, each with valid orders. */
+export function orderMap(value: unknown, ids: readonly number[]): Map<number, OrderDirective[]> {
+ if (typeof value !== 'object' || !value || Array.isArray(value)) throw Error('Orders must be an object keyed by message id.');
+ const found = new Map<number, OrderDirective[]>();
+ for (const [key, orders] of Object.entries(value)) {
+  const i = Number(key);
+  if (!/^\d+$/.test(key) || !ids.includes(i)) throw Error(`Orders name message ${key}, which was not asked for.`);
+  found.set(i, directives(orders));
+ }
+ return found;
 }
 const RETIRE_STOPWORDS: Record<string, true> = { the: true, and: true, for: true, with: true, that: true, this: true, rule: true, order: true, goal: true };
 /** A text retire target retires an order when every content word of the phrase appears in the order's text, in any order. Content words are those of 3+ letters or all-caps acronyms, minus RETIRE_STOPWORDS; a phrase with none retires nothing. */
@@ -99,11 +120,24 @@ function failing(next: readonly OrderItem[], needed: readonly OrderItem[]): Gap[
 function retryNote(gaps: readonly Gap[]) {
  return `These orders lost wording while being restated. Restate each one again, keeping every listed word, number, path and id; typos and names may be fixed.\n${gaps.map(gap => `msg ${gap.source.from.join(', ')} "${wording(gap.source)}": ${gap.omitted ? 'no item covers it' : `missing ${gap.missing.map(t => JSON.stringify(t)).join(', ')}`}`).join('\n')}`;
 }
-/** Per failing order its ids leave every model item that carried them; every needed order left uncovered by that falls back to its verbatim text. */
+/** Per failing order its ids leave every model item that carried them; every needed order left uncovered by that falls back to its verbatim words. */
 function substitute(next: readonly OrderItem[], needed: readonly OrderItem[], gaps: readonly Gap[]): OrderItem[] {
  const ids = new Set(gaps.flatMap(gap => gap.source.from));
  const remaining = next.map(item => ({ ...item, from: item.from.filter(id => !ids.has(id)) })).filter(item => item.from.length);
- return [...remaining, ...needed.filter(source => failing(remaining, [source]).length).map(source => ({ ...source }))];
+ return [...remaining, ...needed.filter(source => failing(remaining, [source]).length).map(source => ({ ...source, text: source.said ?? source.text }))];
+}
+/** A guard failure sets the text to the user's words; a retirement has no words to guard. */
+function guarded(order: OrderDirective): OrderDirective {
+ if ('retire' in order || order.said === undefined || !missingTokens(order.said, order.text).length) return order;
+ return { ...order, text: order.said };
+}
+/** What the consolidation model sees: restatements only, never the verbatim words. */
+function plainDirective(order: OrderDirective): OrderDirective {
+ return 'retire' in order ? order : { text: order.text, kind: order.kind, ...(order.until !== undefined ? { until: order.until } : {}) };
+}
+/** What the ledger keeps: restatements only. */
+function ledgerItem(item: OrderItem): OrderItem {
+ return { text: item.text, kind: item.kind, ...(item.until !== undefined ? { until: item.until } : {}), from: item.from, date: item.date };
 }
 function items(value: unknown): OrderItem[] {
  if (!Array.isArray(value)) throw Error('Ledger must be an array.');
@@ -115,18 +149,22 @@ function items(value: unknown): OrderItem[] {
 export function renderOrders(list: readonly OrderItem[], through: number) {
  return list.length ? `<orders through="${through}">\n${list.map(item => `${Math.max(...item.from)} [${item.kind}${item.until ? ` until: ${item.until}` : ''}] (${item.date.slice(0, 10)}): ${item.text}`).join('\n')}\n</orders>` : '';
 }
-/** Independent of the summary tree. Extraction is background; only batch/first-backfill publication changes the prefix. */
+const head = (s: string) => s.slice(0, TALK_LIMIT);
+const tail = (s: string) => s.slice(-TALK_LIMIT);
+/** Independent of the summary tree. A message's orders are recorded by the summarizer call that scans it (or by the one-time
+ * backfill of history) and consolidated into the ledger at view batches. */
 export class Orders {
  readonly records = new Map<number, ExtractedOrders>();
  ledger: Ledger = { through: -1, items: [] };
  private raw: OrderItem[] = [];
  private retire: RetirementEvent[] = [];
- private pending = new Map<number, OrderExtraction>();
- private lastReply = '';
- private replyContinues = false;
- private busy = new Map<number, Promise<void>>();
- private retry = new Map<number, number>();
- private timer?: ReturnType<typeof setTimeout>;
+ /** Eligible user messages that no call has recorded yet, with their dates. */
+ private unscanned = new Map<number, string>();
+ /** Recorded messages not yet consolidated. Persisted, so a restart finishes what a batch had not published. */
+ private open = new Set<number>();
+ /** History messages already covered by built nodes, waiting for the one-time backfill. */
+ private backlog = new Map<number, BackfillItem>();
+ private draining: Promise<void> = Promise.resolve();
  private controller = new AbortController();
  private publication: Promise<void> = Promise.resolve();
  private bootstrap: Promise<void> = Promise.resolve();
@@ -135,8 +173,7 @@ export class Orders {
  private replay?: Promise<void>;
  private stopped = false;
  private loaded = false;
- private changed = new Set<() => void>();
- constructor(readonly directory: string, private task: OrderTask, private warn: (s: string) => void = console.error, private jobs = 8, private retryMs = 10_000) {
+ constructor(readonly directory: string, private task: OrderTask, private warn: (s: string) => void = console.error, private retryMs = 10_000) {
   mkdirSync(directory, { recursive: true, mode: 0o700 });
   const file = join(directory, 'orders.jsonl');
   if (existsSync(file)) for (const line of readFileSync(file, 'utf8').split('\n').filter(Boolean)) {
@@ -161,75 +198,90 @@ export class Orders {
      return { i: event.i, retire: retireTargets(event.retire) };
     });
    }
+   if (saved.open !== undefined) {
+    if (!Array.isArray(saved.open) || !saved.open.every((i: unknown) => Number.isSafeInteger(i) && (i as number) >= 0)) throw Error('Invalid open orders.');
+    for (const i of saved.open) this.open.add(i);
+   }
   }
+  // A record past the ledger boundary is still to consolidate, whether or not a batch had saved it as open.
+  for (const r of this.records.values()) if (r.i > this.ledger.through) this.open.add(r.i);
  }
- backfill(entries: readonly Entry[]) {
+ /** Opens the history. Eligible messages no call has recorded are queued for the summarizer; the ones a built compressed node
+  * already covers (`covered`) are backfilled once, batched with their nearby talk, and then the ledger is published. */
+ backfill(entries: readonly Entry[], covered: (i: number) => boolean) {
   for (const e of entries) this.append(e);
+  let before: string | undefined;
+  const awaiting: BackfillItem[] = [];
+  for (const e of entries) {
+   if (e.kind === 'talk') {
+    for (const item of awaiting.splice(0)) item.after = head(e.text);
+    before = tail(e.text);
+    continue;
+   }
+   if (!eligible(e) || this.records.has(e.i) || !covered(e.i)) continue;
+   const item: BackfillItem = { i: e.i, text: e.text, ...(before !== undefined ? { before } : {}) };
+   this.backlog.set(e.i, item); awaiting.push(item);
+  }
+  this.draining = this.runBackfill();
   const through = entries.length - 1;
   if (this.pendingThrough !== undefined && this.pendingThrough > this.ledger.through) {
    // A restart interrupted this consolidation (see `pending` in ledger.json): finishing it is blocking work.
-   const pending = this.pendingThrough;
-   this.replay = this.extracted(pending).then(() => this.batch(pending)).catch(error => {
-    if (!this.stopped) this.warn(`Orders replay: ${String(error)}`);
-   });
+   this.replay = this.batch(this.pendingThrough);
   } else if (entries.length && !this.loaded) {
-   this.bootstrap = this.extracted(through).then(() => this.batch(through)).catch(error => {
+   this.bootstrap = this.drain().then(() => this.batch(through)).catch(error => {
     if (!this.stopped) this.warn(`Orders backfill: ${String(error)}`);
    });
   }
  }
- append(entry: Entry) {
-  if (entry.kind === 'talk') {
-   const reply = Buffer.from((this.replyContinues ? this.lastReply : '') + entry.text);
-   let at = Math.max(0, reply.length - 4000);
-   while (at < reply.length && (reply[at] & 0xc0) === 0x80) at++;
-   this.lastReply = reply.subarray(at).toString('utf8');
-   this.replyContinues = true;
-  } else this.replyContinues = false;
-  for (const id of this.retry.keys()) this.retry.set(id, 0);
-  this.pump();
-  if (!eligible(entry) || this.stopped) return;
-  const context = this.lastReply;
-  this.lastReply = '';
-  if (this.records.has(entry.i) || this.pending.has(entry.i)) return;
-  this.pending.set(entry.i, { kind: 'extract', entry, context }); this.pump();
- }
- private notify() { for (const fn of this.changed) fn(); }
- private pump() {
-  if (this.stopped) return;
-  clearTimeout(this.timer); this.timer = undefined;
-  for (const [i, input] of this.pending) {
-   if (this.busy.size >= this.jobs) break;
-   if (this.busy.has(i) || (this.retry.get(i) ?? 0) > Date.now()) continue;
-   const work = Promise.resolve().then(async () => {
-    const orders = directives(await this.task(input, this.controller.signal));
+ /** Resolves when the history backfill has finished (or was stopped). */
+ async drain() { await this.draining; }
+ private async runBackfill() {
+  const queue = [...this.backlog.values()].sort((a, b) => a.i - b.i);
+  for (let at = 0; at < queue.length && !this.stopped; at += BACKFILL_BATCH) {
+   const items = queue.slice(at, at + BACKFILL_BATCH);
+   const ids = items.map(item => item.i);
+   let found: Map<number, OrderDirective[]> | undefined;
+   for (let attempt = 0; attempt < BACKFILL_ATTEMPTS && !found && !this.stopped; attempt++) try {
+    found = orderMap(await this.task({ kind: 'backfill', items }, this.controller.signal), ids);
+   } catch (error) {
     if (this.stopped) return;
-    const record = { i, date: input.entry.date, orders };
-    appendJson(join(this.directory, 'orders.jsonl'), record);
-    this.records.set(i, record); this.pending.delete(i); this.retry.delete(i);
-   }).catch(error => { if (!this.stopped) { this.warn(`Orders ${i}: ${String(error)}`); this.retry.set(i, Date.now() + this.retryMs); } })
-    .finally(() => { this.busy.delete(i); this.pump(); this.notify(); });
-   this.busy.set(i, work);
+    this.warn(`Orders backfill ${ids.join(', ')}: ${String(error)}`);
+    if (attempt + 1 < BACKFILL_ATTEMPTS) await new Promise(resolve => setTimeout(resolve, this.retryMs));
+   }
+   if (found) {
+    this.recordAll(found);
+    const missing = ids.filter(i => !found.has(i));
+    if (missing.length) this.warn(`Orders backfill: no orders returned for msg ${missing.join(', ')}.`);
+   }
+   for (const i of ids) this.backlog.delete(i);
   }
-  const deadlines = [...this.retry.values()].filter(t => t > Date.now());
-  if (deadlines.length) this.timer = setTimeout(() => this.pump(), Math.max(1, Math.min(...deadlines) - Date.now()));
  }
- async extracted(through = Infinity, signal?: AbortSignal) {
-  while ([...this.pending.keys()].some(i => i <= through)) {
-   if (this.stopped || signal?.aborted) throw Error('Orders wait cancelled.');
-   await new Promise<void>((resolve, reject) => {
-    const cleanup = () => { this.changed.delete(wake); signal?.removeEventListener('abort', abort); };
-    const wake = () => { cleanup(); resolve(); };
-    const abort = () => { cleanup(); reject(Error('Orders wait cancelled.')); };
-    this.changed.add(wake); signal?.addEventListener('abort', abort, { once: true });
-   });
+ append(entry: Entry) {
+  if (this.stopped || !eligible(entry) || this.records.has(entry.i)) return;
+  this.unscanned.set(entry.i, entry.date);
+ }
+ /** The unscanned user messages with ids in [from, to], oldest first: what a summarizer call over that span must read for orders. */
+ scan(from: number, to: number) {
+  return [...this.unscanned.keys()].filter(i => i >= from && i <= to).sort((a, b) => a - b);
+ }
+ /** Records what a summarizer call or the backfill read for each message, before the node that call built is written. A
+  * restatement that loses a must-keep token of the user's words falls back to those words. */
+ recordAll(scanned: ReadonlyMap<number, readonly OrderDirective[]>) {
+  for (const [i, orders] of scanned) {
+   const date = this.unscanned.get(i);
+   if (this.records.has(i) || date === undefined) continue;
+   const record: ExtractedOrders = { i, date, orders: orders.map(guarded) };
+   appendJson(join(this.directory, 'orders.jsonl'), record);
+   this.records.set(i, record); this.unscanned.delete(i); this.backlog.delete(i); this.open.add(i);
   }
  }
  /** Synchronously rewrites ledger.json: the current ledger plus optional extras. A batch's `pending` marker must be on
   * disk before the merge that requested it can save the view, so this never waits. */
  private writeLedger(extra: { pending?: number }) {
   atomicWrite(join(this.directory, 'ledger.json'), JSON.stringify({
-   ...this.ledger, ...(this.raw.length ? { raw: this.raw } : {}), ...(this.retire.length ? { retire: this.retire } : {}), ...extra,
+   through: this.ledger.through, items: this.ledger.items.map(ledgerItem),
+   ...(this.raw.length ? { raw: this.raw.map(ledgerItem) } : {}), ...(this.retire.length ? { retire: this.retire } : {}),
+   ...(this.open.size ? { open: [...this.open] } : {}), ...extra,
   }));
  }
  batch(through: number) {
@@ -238,13 +290,13 @@ export class Orders {
    this.writeLedger({ pending: through });
   }
   this.publication = this.publication.then(async () => {
-   await this.extracted(through);
-   const records = [...this.records.values()].filter(r => r.i > this.ledger.through && r.i <= through).sort((a, b) => a.i - b.i);
    if (through <= this.ledger.through) return;
+   const records = [...this.records.values()].filter(r => this.open.has(r.i) && r.i <= through).sort((a, b) => a.i - b.i);
    const targets = records.flatMap(r => r.orders.flatMap(order => 'retire' in order ? [{ i: r.i, retire: order.retire }] : []));
+   const payload = records.map(r => ({ i: r.i, date: r.date, orders: r.orders.map(plainDirective) }));
    let retry: string | undefined;
    for (let attempt = 0; attempt < 3; attempt++) try {
-    const next = items(await this.task({ kind: 'consolidate', ledger: this.ledger, records, through, retry }, this.controller.signal)).filter(item => !retired(item, targets));
+    const next = items(await this.task({ kind: 'consolidate', ledger: this.ledger, records: payload, through, retry }, this.controller.signal)).filter(item => !retired(item, targets));
     const replacedBy = (previous: OrderItem) => next.some(item => item.from.some(id => records.some(r => r.i === id && r.i > Math.max(...previous.from) && r.orders.some(order => !('retire' in order))))
      && previous.from.some(id => item.text.includes(`(replaces msg ${id})`)));
     const kept = this.ledger.items.filter(item => !retired(item, targets) && !replacedBy(item));
@@ -264,14 +316,17 @@ export class Orders {
      if (item.from.some(id => !dates.has(id))) throw Error('Ledger invented a source id.');
      item.date = dates.get(Math.max(...item.from))!;
     }
-    if (Buffer.byteLength(renderOrders(final, through), 'utf8') > ORDER_LIMIT) throw Error('Ledger exceeds 16000 UTF-8 bytes; combine related orders without dropping any.');
+    const ledgerItems = final.map(ledgerItem);
+    if (Buffer.byteLength(renderOrders(ledgerItems, through), 'utf8') > ORDER_LIMIT) throw Error('Ledger exceeds 16000 UTF-8 bytes; combine related orders without dropping any.');
     // A newer batch may already be checkpointed; keep its marker when this older consolidation lands first.
     const pendingAgain = this.pendingThrough !== undefined && this.pendingThrough > through ? { pending: this.pendingThrough } : {};
     if (this.pendingThrough === through) this.pendingThrough = undefined;
-    const saved = { through, items: final, ...pendingAgain };
-    atomicWrite(join(this.directory, 'ledger.json'), JSON.stringify(saved)); this.ledger = { through, items: final }; this.raw = []; this.retire = []; this.loaded = true; return;
+    for (const r of records) this.open.delete(r.i);
+    const saved = { through, items: ledgerItems, ...(this.open.size ? { open: [...this.open] } : {}), ...pendingAgain };
+    atomicWrite(join(this.directory, 'ledger.json'), JSON.stringify(saved));
+    this.ledger = { through, items: ledgerItems }; this.raw = []; this.retire = []; this.loaded = true; return;
    } catch (error) { if (this.stopped) return; this.warn(`Orders consolidation: ${String(error)}`); }
-   this.raw = records.flatMap(r => r.orders.flatMap(order => 'retire' in order ? [] : [{ ...order, from: [r.i], date: r.date }]));
+   this.raw = records.flatMap(r => r.orders.flatMap(order => 'retire' in order ? [] : [ledgerItem({ ...order, from: [r.i], date: r.date })]));
    this.retire = targets;
    // Failed after its retries: raw orders stay rendered and `pending` survives for the next attempt (this session's next batch or a restart).
    this.writeLedger({ pending: Math.max(through, this.pendingThrough ?? through) });
@@ -291,5 +346,5 @@ export class Orders {
   })]);
  }
  render() { return renderOrders([...this.ledger.items, ...this.raw].filter(item => !retired(item, this.retire)), this.ledger.through); }
- async close() { this.stopped = true; this.controller.abort(); clearTimeout(this.timer); this.notify(); await Promise.allSettled(this.busy.values()); await Promise.all([this.publication, this.bootstrap, this.replay ?? Promise.resolve()]); }
+ async close() { this.stopped = true; this.controller.abort(); await Promise.all([this.publication, this.bootstrap, this.replay ?? Promise.resolve(), this.draining]); }
 }

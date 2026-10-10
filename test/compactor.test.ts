@@ -4,7 +4,8 @@ import * as ai from '@oh-my-pi/pi-ai';
 import type { ModelRegistry } from '@oh-my-pi/pi-coding-agent';
 import { buildModel } from '@oh-my-pi/pi-catalog/build';
 import { compaction } from '../src/prompts.ts';
-import { NODE } from '../src/memory.ts';
+import { NODE, type CompressorResult } from '../src/memory.ts';
+import { ThinkingLevel } from '@oh-my-pi/pi-agent-core';
 let streaming: typeof ai.streamSimple;
 mock.module('@oh-my-pi/pi-ai', () => ({ ...ai, streamSimple: (...args: Parameters<typeof ai.streamSimple>) => streaming(...args) }));
 // Module-loading boundary: install the fake provider before importing its consumer.
@@ -14,6 +15,7 @@ const model = buildModel({ id: 'fixture', name: 'Fixture', api: 'anthropic-messa
 const registry = { find: () => model, getApiKey: async () => 'synthetic' } as unknown as ModelRegistry;
 const reply = (text: string): ai.AssistantMessage => ({ role: 'assistant', content: [{ type: 'text', text }], api: model.api, provider: model.provider, model: model.id, timestamp: 0, stopReason: 'stop', usage: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0, totalTokens: 0, cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0, total: 0 } } });
 const compressor = () => createCompressor(registry, () => ({ provider: 'fixture', model: 'fixture', thinking: 'off' }));
+const summaryOf = (r: CompressorResult) => typeof r === 'string' ? r : r.text;
 const input = { context: '<chat>\n</chat>', source: 'user: ' + 'valuable '.repeat(100), part: { l: 0, i: 40 } };
 test('recipe ruler, merge ranges and Too long retry; shortest of at most five replies', async () => {
   assert.equal(compaction({ source: 'user: hi', part: { l: 0, i: 40 } }), `Compaction: compress message 40 into one line of at most 512 bytes\n(about 70 words), the length of this ruler:\n${'-'.repeat(NODE)}\n<input>\nuser: hi\n</input>`);
@@ -28,7 +30,7 @@ test('recipe ruler, merge ranges and Too long retry; shortest of at most five re
     queueMicrotask(() => { stream.push({ type: 'done', reason: 'stop', message }); stream.end(); });
     return stream;
   };
-  assert.equal((await compressor()(input, new AbortController().signal)).length, 600);
+  assert.equal(summaryOf(await compressor()(input, new AbortController().signal)).length, 600);
   assert.equal(calls, 5);
   assert.match(String(contexts[1].messages.at(-1)?.content), /Too long: your line is 700 bytes/);
   assert.ok(String(contexts[1].messages.at(-1)?.content).endsWith('x'.repeat(512) + '| ← LIMIT'));
@@ -94,20 +96,20 @@ test('(c) the ORDERS section is not counted in the 512-byte line, so long orders
   const calls = streamOnce(() => `user: kept\nORDERS:\n${JSON.stringify(orders)}`);
   const result = await compressor()({ ...input, scan: [40] }, new AbortController().signal);
   assert.equal(calls(), 1);
-  assert.equal(result.text, 'user: kept');
+  assert.ok(typeof result !== 'string'); assert.equal(result.text, 'user: kept');
 });
 test('(c) a too-long line retries, and the shortest line keeps the orders of its own reply', async () => {
   const lengths = [700, 650, 600, 620, 610];
   const calls = streamOnce(k => `${'x'.repeat(lengths[k])}\nORDERS:\n${JSON.stringify({ '40': [{ said: `order-${k}`, text: `order-${k}`, kind: 'rule' }] })}`);
   const result = await compressor()({ ...input, scan: [40] }, new AbortController().signal);
   assert.equal(calls(), 5);
-  assert.equal(result.text.length, 600);
-  assert.deepEqual(result.orders.get(40), [{ said: 'order-2', text: 'order-2', kind: 'rule' }]);
+  assert.ok(typeof result !== 'string'); assert.equal(result.text.length, 600);
+  assert.deepEqual(result.orders?.get(40), [{ said: 'order-2', text: 'order-2', kind: 'rule' }]);
 });
 test('(d) invalid ORDERS JSON leaves the scanned messages unrecorded and does not fail the line', async () => {
   const calls = streamOnce(() => 'user: kept\nORDERS:\n{"40": [oops');
   const result = await compressor()({ ...input, scan: [40] }, new AbortController().signal);
-  assert.equal(result.text, 'user: kept');
+  assert.ok(typeof result !== 'string'); assert.equal(result.text, 'user: kept');
   assert.equal(calls(), 1);
   assert.equal(result.orders?.has(40) ?? false, false);
 });
@@ -116,7 +118,7 @@ test('(h) order tasks think at medium even when the compactor is set to xhigh', 
   const seen: unknown[] = [];
   streaming = (_model, _context, options) => { seen.push(options?.reasoning); const stream = ai.createAssistantMessageEventStream(); const message = reply('[]'); queueMicrotask(() => { stream.push({ type: 'done', reason: 'stop', message }); stream.end(); }); return stream; };
   const reasonRegistry = { find: () => thinking, getApiKey: async () => 'synthetic' } as unknown as ModelRegistry;
-  const task = createOrderTask(reasonRegistry, () => ({ provider: 'fixture', model: 'reasoner', thinking: 'xhigh' }));
+  const task = createOrderTask(reasonRegistry, () => ({ provider: 'fixture', model: 'reasoner', thinking: ThinkingLevel.XHigh }));
   await task({ kind: 'consolidate', ledger: { through: -1, items: [] }, records: [], through: 0 }, new AbortController().signal);
   await task({ kind: 'backfill', items: [] }, new AbortController().signal);
   assert.deepEqual(seen, ['medium', 'medium']);

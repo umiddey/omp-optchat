@@ -42,7 +42,9 @@ test('(b) short user messages are scanned by the first merge call covering them,
     await memory.settle(AbortSignal.timeout(5000), 'tree');
     assert.deepEqual(calls.filter(c => c.part.l === 0), []);
     assert.deepEqual(calls.map(c => c.scan), [[0, 1]]);
-    assert.equal(memory.orders!.records.get(1)?.orders[0].said, 'Always verify');
+    const first = memory.orders!.records.get(1)?.orders[0];
+    assert.ok(first && !('retire' in first));
+    assert.equal(first.said, 'Always verify');
   } finally { await memory.close(); }
 });
 
@@ -60,7 +62,7 @@ test('(f) a short message scanned after a batch is consolidated at the next batc
   const task: OrderTask = async input => {
     if (input.kind !== 'consolidate') return [];
     seen.push(input.records.map(r => r.i)); sent.push(JSON.stringify(input.records));
-    return [...input.ledger.items, ...input.records.flatMap(r => r.orders.map(order => ({ text: order.text, kind: 'rule' as const, from: [r.i], date: r.date })))];
+    return [...input.ledger.items, ...input.records.flatMap(r => r.orders.flatMap(order => 'retire' in order ? [] : [{ text: order.text, kind: 'rule' as const, from: [r.i], date: r.date }]))];
   };
   const o = new Orders(scratch(), task, () => {}, 10);
   try {

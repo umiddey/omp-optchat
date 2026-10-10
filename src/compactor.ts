@@ -1,11 +1,11 @@
 import { streamSimple, type Api, type AssistantMessage, type Message, type Model } from '@oh-my-pi/pi-ai';
-import type { ThinkingLevel } from '@oh-my-pi/pi-agent-core';
+import { ThinkingLevel } from '@oh-my-pi/pi-agent-core';
 import type { ModelRegistry } from '@oh-my-pi/pi-coding-agent';
 import { COMPACT, compaction, tooLong } from './prompts.ts';
 import { bytes, NODE, type Compressor } from './memory.ts';
 import { cachePayload, splitView } from './cache.ts';
 import { EXTRACT_ORDERS, CONSOLIDATE_ORDERS } from './prompts.ts';
-import type { OrderTask } from './orders.ts';
+import { orderMap, type OrderDirective, type OrderTask } from './orders.ts';
 
 export interface ModelChoice { provider: string; model: string; thinking: ThinkingLevel }
 /** OMP's streamSimple resolves the selected effort against the model's capabilities. */
@@ -42,6 +42,11 @@ function primeFirst() {
     };
   };
 }
+/** One reply's ORDERS JSON. Invalid JSON, or orders for ids the call did not scan, leave the messages unscanned for the next covering call. */
+function parseOrders(text: string, ids: readonly number[]) {
+  try { return orderMap(JSON.parse(text.trim().replace(/^```(?:json)?\s*/, '').replace(/\s*```$/, '')), ids); }
+  catch { return undefined; }
+}
 /** The model is asked for 512 bytes; `accepted` is the longest line kept without a retry (the profile's summary size tolerance). */
 export function createCompressor(registry: ModelRegistry, choice: () => ModelChoice,
   onUsage: (message: AssistantMessage) => void = () => {}, accepted = () => NODE): Compressor {
@@ -55,7 +60,7 @@ export function createCompressor(registry: ModelRegistry, choice: () => ModelCho
     const messages: Message[] = [{ role: 'user', content: [{ type: 'text', text: input.context }, { type: 'text', text: step }], timestamp: Date.now() }];
     const view = splitView(input.context);
     const prefix = model.api === 'anthropic-messages' && view.length > 1 ? `${model.provider}/${model.id}/${thinking ?? 'off'}\n${view.slice(0, -1).join('')}` : undefined;
-    const tries: string[] = [];
+    const tries: { line: string; orders?: Map<number, OrderDirective[]> }[] = [];
     for (let attempt = 0; attempt < 5; attempt++) {
       const warmed = prefix ? await gate(prefix, signal) : () => {};
       let reply: AssistantMessage;
@@ -73,19 +78,25 @@ export function createCompressor(registry: ModelRegistry, choice: () => ModelCho
       onUsage(reply);
       if (reply.stopReason === 'error' || reply.stopReason === 'aborted') throw new Error(reply.errorMessage ?? `Compactor ${reply.stopReason}`);
       // The compactions' view shows each line under its id+n| head, which a line can copy.
-      const line = reply.content.filter(c => c.type === 'text').map(c => c.text).join('').trim().replace(/^\d+\+\d+\|\s*/, '');
+      const raw = reply.content.filter(c => c.type === 'text').map(c => c.text).join('').trim();
+      // With a scan, the orders follow the line after an `ORDERS:` line; they are not part of the line's 512 bytes.
+      const at = raw.search(/^ORDERS:/m);
+      const line = (at < 0 ? raw : raw.slice(0, at)).trim().replace(/^\d+\+\d+\|\s*/, '');
       if (!line) throw new Error('Compactor returned no text.');
-      tries.push(line);
+      tries.push({ line, orders: input.scan && at >= 0 ? parseOrders(raw.slice(at + 'ORDERS:'.length), input.scan) : undefined });
       if (bytes(line) <= accepted()) break;
       messages.push(reply);
       const cut = Buffer.from(line).subarray(0, NODE).toString('utf8').replace(/\uFFFD$/, '');
       messages.push({ role: 'user', content: tooLong(bytes(line), cut), timestamp: Date.now() });
     }
-    return tries.reduce((a, b) => bytes(a) <= bytes(b) ? a : b);
+    const chosen = tries.reduce((a, b) => bytes(a.line) <= bytes(b.line) ? a : b);
+    if (!input.scan) return chosen.line;
+    // Each try scans the same messages, so when the accepted line's orders are invalid, the first valid ones this call produced stand.
+    return { text: chosen.line, orders: chosen.orders ?? tries.find(t => t.orders)?.orders ?? new Map() };
   };
 }
 
-/** Orders reuse the profile's compactor model and effort, but never enter the summary tree. */
+/** Orders reuse the profile's compactor model at medium effort, and never enter the summary tree. */
 export function createOrderTask(registry: ModelRegistry, choice: () => ModelChoice,
   onUsage: (message: AssistantMessage) => void = () => {}): OrderTask {
   return async (input, signal) => {
@@ -94,8 +105,8 @@ export function createOrderTask(registry: ModelRegistry, choice: () => ModelChoi
     const note = input.kind === 'consolidate' && input.retry ? `${input.retry}\n` : '';
     const messages: Message[] = [{ role: 'user', content: `${note}${JSON.stringify(input.kind === 'consolidate' ? { ...input, retry: undefined } : input)}`, timestamp: Date.now() }];
     const reply = await streamSimple(model, {
-      systemPrompt: [input.kind === 'extract' ? EXTRACT_ORDERS : CONSOLIDATE_ORDERS], messages,
-    }, { apiKey: await registry.getApiKey(model), sessionId: 'optchat-orders', reasoning: reasoningFor(model, selected.thinking),
+      systemPrompt: [input.kind === 'backfill' ? EXTRACT_ORDERS : CONSOLIDATE_ORDERS], messages,
+    }, { apiKey: await registry.getApiKey(model), sessionId: 'optchat-orders', reasoning: reasoningFor(model, ThinkingLevel.Medium),
       signal, cacheRetention: 'short' }).result();
     onUsage(reply);
     if (reply.stopReason === 'error' || reply.stopReason === 'aborted') throw Error(reply.errorMessage ?? `Orders ${reply.stopReason}`);

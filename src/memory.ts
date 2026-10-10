@@ -1,7 +1,7 @@
 import { EventEmitter } from 'node:events';
 import { FileStore, storeFor, type Saved, type Store } from './store.ts';
 import { pageText } from './paging.ts';
-import { Orders, type OrderTask } from './orders.ts';
+import { Orders, type OrderDirective, type OrderTask } from './orders.ts';
 
 export const NODE = 512;
 export const VIEW = 128_000;
@@ -12,9 +12,11 @@ export type Kind = typeof KINDS[number];
 export interface Entry { i: number; kind: Kind; text: string; size: number; date: string; receipt?: string }
 export interface Part { l: number; i: number }
 export interface Summary extends Part { text: string; size: number }
-/** `part` is the node to build: a message's leaf, or the merge of its two halves. */
-export interface Compression { context: string; source: string; part: Part }
-export type Compressor = (input: Compression, signal: AbortSignal) => Promise<string>;
+/** `part` is the node to build: a message's leaf, or the merge of its two halves. `scan`: the unscanned user message ids in its span, when the call also returns their orders. */
+export interface Compression { context: string; source: string; part: Part; scan?: number[] }
+/** A plain summary, or the summary with the orders read for its `scan` ids. */
+export type CompressorResult = string | { text: string; orders?: ReadonlyMap<number, readonly OrderDirective[]> };
+export type Compressor = (input: Compression, signal: AbortSignal) => Promise<CompressorResult>;
 const key = ({ l, i }: Part) => l * 2 ** 40 + i;
 const UNBUILT = '(not summarized yet: zoom it)';
 export const start = ({ l, i }: Part) => i * 2 ** l;
@@ -127,7 +129,7 @@ export class Memory {
   static async open(directory: string, compress: Compressor, warn: (s: string) => void = console.error, budget = VIEW, jobs = 8, orderTask?: OrderTask) {
     const store = storeFor(directory, warn);
     // Orders is attached before construction so merges while replaying the saved view checkpoint `pending` and wait for their records.
-    const orders = orderTask ? new Orders(directory, orderTask, warn, jobs) : undefined;
+    const orders = orderTask ? new Orders(directory, orderTask, warn) : undefined;
     return new Memory({ directory, store, saved: await store.load(), orders }, compress, warn, budget, jobs);
   }
   /** A directory alone opens a FileStore there. `jobs`: summaries built at once, and how many unbuilt lines a new message's node
@@ -151,9 +153,9 @@ export class Memory {
     }
     for (const node of this.tree.values()) this.queueParent(node);
     for (let i = 0; i < this.root.length; i++) if (!this.node({ l: 0, i })) this.unbuilt.add(i);
-    // Before any view merge can run: backfill queues extraction, replays a saved `pending` batch as blocking work, and
+    // Before any view merge can run: backfill queues the unscanned messages, replays a saved `pending` batch as blocking work, and
     // lets every merge below checkpoint the ledger before the view is saved.
-    this.orders?.backfill(this.root);
+    this.orders?.backfill(this.root, i => this.covers(i));
     // Refolding the log gives a different view than the live one, and every cache entry would miss, so the view is saved.
     const loaded = this.load(saved.view);
     for (const part of this.view) this.compaction.push(part);
@@ -296,13 +298,36 @@ export class Memory {
   }
   /** Nothing is being built, nothing more can start, and something failed: only a retry can make progress. */
   private get stalled() { return this.busy.size === 0 && !this.scheduled && this.retryAt.size > 0; }
-  private async build(part: Part) {
-    const source = part.l === 0 ? `${this.root[part.i].kind}: ${this.root[part.i].text}`
+  /** The text a node summarizes: its message's line, or its two halves joined. */
+  private sourceOf(part: Part) {
+    return part.l === 0 ? `${this.root[part.i].kind}: ${this.root[part.i].text}`
       : [0, 1].map(offset => this.text({ l: part.l - 1, i: 2 * part.i + offset })).join('\n');
+  }
+  /** Whether a built compressed node covers message i, through its own leaf or an ancestor; the first unbuilt part ends the walk. */
+  private covers(i: number) {
+    for (let part: Part = { l: 0, i }; part.l < 64; part = { l: part.l + 1, i: Math.floor(part.i / 2) }) {
+      if (!this.node(part)) return false;
+      if (bytes(this.sourceOf(part)) > NODE) return true;
+    }
+    return false;
+  }
+  private async build(part: Part) {
+    const source = this.sourceOf(part);
     const mergeSource = part.l > 0 ? [0, 1].map(offset => flat(this.text({ l: part.l - 1, i: 2 * part.i + offset }))).join('\n') : source;
-    const text = bytes(source) <= NODE ? source : (await this.compress({ context: this.compactionView(part), source: mergeSource, part }, this.controller.signal)).trim();
+    // A literal node summarizes nothing, so it scans nothing; a compressed node scans the unscanned user messages in its span.
+    let text = source;
+    let orders: ReadonlyMap<number, readonly OrderDirective[]> | undefined;
+    if (bytes(source) > NODE) {
+      const scan = this.orders?.scan(start(part), end(part) - 1) ?? [];
+      const reply = await this.compress({ context: this.compactionView(part), source: mergeSource, part, ...(scan.length ? { scan } : {}) }, this.controller.signal);
+      const result = typeof reply === 'string' ? { text: reply } : reply;
+      text = result.text.trim();
+      orders = result.orders;
+    }
     if (this.stopped) return;
     if (!text) throw new Error('Compactor returned an empty summary.');
+    // Orders are recorded before the node that scanned them is written, so a restart keeps them.
+    if (orders) this.orders?.recordAll(orders);
     const node = { ...part, text, size: lineBytes(text) };
     // A failed node write fails the build, which is retried.
     const written = this.enqueue(() => this.store.appendNode(node), error => { throw error; });
