@@ -1,8 +1,8 @@
 import { test, expect } from 'bun:test';
-import { mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
+import { mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
-import { Orders, type OrderTask } from '../src/orders.ts';
+import { Orders, type OrderInput, type OrderTask } from '../src/orders.ts';
 import { projectContext } from '../src/integration.ts';
 import type { Entry } from '../src/memory.ts';
 import { cachePayload, splitView } from '../src/cache.ts';
@@ -16,7 +16,7 @@ async function fixture(run: (o: Orders, dir: string) => Promise<void>, task: Ord
 }
 test('extract records every user including empty; skips custom tagged and non-user', async () => {
  await fixture(async (o, dir) => { o.append(entry(0)); o.append(entry(1, 'question?')); o.append(entry(2, '[async-result] result')); o.append(entry(3, '[any-custom] result')); o.append(entry(4, 'reply', 'talk')); await o.extracted();
- expect(readFileSync(join(dir, 'orders.jsonl'), 'utf8').trim().split('\n').map(x => JSON.parse(x))).toEqual([{ i: 0, date: '2026-10-10', orders: [{ text: 'Never push', kind: 'rule' }] }, { i: 1, date: '2026-10-10', orders: [] }]);
+ expect(readFileSync(join(dir, 'orders.jsonl'), 'utf8').trim().split('\n').map(x => JSON.parse(x))).toEqual([{ i: 0, date: '2026-10-10', orders: [{ text: 'Never push', kind: 'rule', said: 'Never push' }] }, { i: 1, date: '2026-10-10', orders: [] }]);
  }, async task => task.kind === 'extract' ? task.entry.i === 0 ? ['Never push'] : [] : []);
 });
 test('consolidation only at batch; persisted ledger loads without recompute', async () => {
@@ -504,4 +504,59 @@ test('F a verbatim fallback keeps coverage of a passing order that shares a mess
   if (task.kind === 'extract') return [{ text: 'Never push to main.', kind: 'rule' }, { text: 'Always verify claims.', kind: 'rule' }];
   return [{ text: 'Always verify claims.', kind: 'rule', from: [0], date: '2026-10-10' }];
  }, [], text => warnings.push(text));
+});
+test('G extraction stores the user words as said beside the clean restatement', async () => {
+ const dir = mkdtempSync(join(tmpdir(), 'orders-said-'));
+ const task: OrderTask = async task => task.kind === 'extract' ? [{ said: 'gatefoge never push', text: 'Gateforge must never push', kind: 'rule' }] : [];
+ const o = new Orders(dir, task, () => {}, 2, 10);
+ try {
+  o.append(entry(0, 'gatefoge never push')); await o.extracted();
+  expect(readFileSync(join(dir, 'orders.jsonl'), 'utf8').trim().split('\n').map(x => JSON.parse(x))).toEqual([{ i: 0, date: '2026-10-10', orders: [{ said: 'gatefoge never push', text: 'Gateforge must never push', kind: 'rule' }] }]);
+ } finally { await o.close(); rmSync(dir, { recursive: true, force: true }); }
+});
+test('G an extracted restatement that drops a number is retried once with the missing token named', async () => {
+ const inputs: OrderInput[] = [];
+ const task: OrderTask = async input => {
+  inputs.push(input);
+  if (input.kind !== 'extract') return [];
+  return inputs.length === 1 ? [{ said: 'PM gate shows 0 waived', text: 'PM gate shows none waived', kind: 'rule' }] : [{ said: 'PM gate shows 0 waived', text: 'PM gate shows 0 waived', kind: 'rule' }];
+ };
+ await fixture(async (o, dir) => {
+  o.append(entry(0, 'PM gate shows 0 waived')); await o.extracted();
+  expect(inputs.filter(i => i.kind === 'extract')).toHaveLength(2);
+  const retry = inputs.filter(i => i.kind === 'extract')[1];
+  if (retry.kind !== 'extract') throw Error('Expected extraction retry');
+  expect(retry.retry).toContain('"0"');
+  expect(readFileSync(join(dir, 'orders.jsonl'), 'utf8').trim().split('\n').map(x => JSON.parse(x))[0].orders[0].text).toBe('PM gate shows 0 waived');
+ }, task);
+});
+test('G an extracted restatement that still drops a token after the retry is replaced by the user words', async () => {
+ const warnings: string[] = [];
+ const task: OrderTask = async input => input.kind === 'extract' ? [{ said: 'docs/gate.md must stay', text: 'Keep the gate doc', kind: 'rule' }] : [];
+ await fixture(async (o, dir) => {
+  o.append(entry(0, 'docs/gate.md must stay')); await o.extracted();
+  expect(readFileSync(join(dir, 'orders.jsonl'), 'utf8').trim().split('\n').map(x => JSON.parse(x))[0].orders[0].text).toBe('docs/gate.md must stay');
+  expect(warnings).toHaveLength(1);
+ }, task, [], text => warnings.push(text));
+});
+test('G consolidation receives only clean text and ledger items never carry said', async () => {
+ const dir = mkdtempSync(join(tmpdir(), 'orders-said-'));
+ mkdirSync(dir, { recursive: true });
+ writeFileSync(join(dir, 'orders.jsonl'), JSON.stringify({ i: 0, date: '2026-10-10', orders: [{ said: 'read docs/gate.md before push', text: 'Read docs/gate.md before pushing', kind: 'rule' }] }) + '\n');
+ const seen: OrderInput[] = [];
+ const task: OrderTask = async input => { seen.push(input); return input.kind === 'consolidate' ? [{ text: 'Read docs/gate.md before pushing', kind: 'rule', from: [0], date: '2026-10-10' }] : []; };
+ const o = new Orders(dir, task, () => {}, 2, 10);
+ try {
+  await o.batch(0);
+  const consolidation = seen.find(i => i.kind === 'consolidate');
+  if (!consolidation || consolidation.kind !== 'consolidate') throw Error('Expected consolidation');
+  expect(JSON.stringify(consolidation.records)).not.toContain('said');
+  const saved = JSON.parse(readFileSync(join(dir, 'ledger.json'), 'utf8'));
+  expect(saved.items.every((item: object) => !('said' in item))).toBe(true);
+ } finally { await o.close(); rmSync(dir, { recursive: true, force: true }); }
+});
+test('G the extraction prompt asks for said beside the clean text and forbids guessing unclear words', () => {
+ expect(EXTRACT_ORDERS).toContain('{said, text, kind');
+ expect(EXTRACT_ORDERS).toContain('keep it exactly as said');
+ expect(EXTRACT_ORDERS).toContain('never guess');
 });
