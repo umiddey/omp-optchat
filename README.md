@@ -102,6 +102,11 @@ missing ids once in the background, batched; their first ledger appears at a sub
 completion. Normal turns do not wait for scanning; a view rewrite waits for its consolidation with the
 usual working message.
 
+Profiles written before restated orders included `said` migrate once in the background. Clean extractions
+are appended as superseding records, never by rewriting history; the rendered ledger changes only at the
+next normal view batch. Duplicate orders merge with their source ids, and newer incompatible orders replace
+older ones without treating apparent completion as retirement.
+
 Standing means an instruction keeps applying beyond the current task. One-off agent assignments,
 action approvals, pushing a particular change, or installing/restarting it are not standing orders.
 To understand a short answer that chooses a lasting policy, the summarizer also sees the preceding

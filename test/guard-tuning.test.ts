@@ -31,6 +31,18 @@ describe('shouted words are not acronyms', () => {
     expect(missingTokens('NEVER push it', 'push it')).toEqual(['NEVER']);
   });
 });
+test('shouted profanity and emphasis are filler, but NEVER remains a condition', () => {
+ expect(missingTokens('NEVER FUCKING EVER stop working; WHAT IS THE POINT', 'Never stop working.')).toEqual([]);
+ expect(missingTokens('NEVER FUCKING EVER stop working', 'Stop working.')).toEqual(['NEVER']);
+});
+test('all in a dictation filler is not a quantifier; actual all remains guarded', () => {
+ expect(missingTokens('keep it efficient and all that', 'Keep it efficient.')).toEqual([]);
+ expect(missingTokens('fix all the endpoints', 'Fix the endpoints.')).toEqual(['all']);
+});
+test('an acronym plural keeps its name without allowing a different acronym', () => {
+ expect(missingTokens('Raise PR', 'Raise PRs.')).toEqual([]);
+ expect(missingTokens('Raise PR', 'Raise MRs.')).toEqual(['PR']);
+});
 
 describe('dictation capitals are not names', () => {
   test('a mid-sentence stoplist word is not a must-keep name', () => {
