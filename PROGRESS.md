@@ -549,3 +549,70 @@ Full final rendered block with kinds/until, all extraction records, detailed PAS
 trial accounting: `/tmp/optchat-ledger-results.md`. Temporary evaluation script/profile/agent.db
 are removed before final commit; no live profile/main checkout edits or install/push/merge/publish.
 
+
+## Durable ledger recovery — ledger-durable (2026-10-10)
+
+Bug (live, owner profile): a view merge batch queued consolidation; closing OMP aborted the
+model call and saved nothing — no `pending` marker existed — and the next start only consolidated
+on a later merge (or never, in short sessions), so merged view lines lost their orders and the
+orders block changed at an arbitrary turn. Fix: `batch(P)` synchronously and atomically writes
+`pending: P` into `ledger.json` (keeping `through`/`items`/`raw`/`retire`) before the merge that
+requested it can save `view.json`; `Orders` attaches before `Memory`'s constructor replay with
+backfill inside the constructor, so startup merges checkpoint too and wait for their extraction
+records; a saved `pending > through` replays as blocking work awaited by the first turn's settle;
+`close()` aborts the call but never drops the marker; failure after three retries renders raw
+orders for `(through, pending]` and keeps `pending` for the next attempt; a restart with no
+pending work and an existing ledger consolidates nothing (orders block byte-identical); the very
+first ledger (backfill with no ledger) stays background. README, DESIGN and this file document it.
+
+Red-first (`bun test test/orders.test.ts` at 47daf20): 25 pass / 4 fail — 'batch checkpoints
+pending…', 'close during a batch…', 'two consecutive turns…', 'consolidation failing after
+retries…' all failed on `pending` absent from ledger.json (Expected 0/1, Received undefined).
+The 'restart with no pending work' test passes at 47daf20 by design: it guards behavior that
+already held (loaded ledger ⇒ no start consolidation).
+
+| Acceptance | PASS/FAIL | Evidence |
+|---|---|---|
+| Checkpoint before view save | PASS | new test: FileStore.saveView spy read `pending: 2` from ledger.json at the merge's view write; Orders-level sync checkpoint asserts `pending` before `batch()` resolves |
+| Close mid-batch keeps pending; restart blocks first settle | PASS | new test: checkpoint survives `close()`; reopened `settle()` unresolved while consolidation runs, then `through` advances and the retired order is gone |
+| Byte-identical openings after the replay | PASS | new test: two consecutive `settle()` cycles render identical orders blocks and identical projected first blocks |
+| Restart with no pending work | PASS | new test (green at 47daf20 by design): restored ledger renders byte-identically, consolidation task must not run |
+| Failed consolidation keeps pending, renders raw | PASS | new test: 3 attempts, raw fallback rendered, `pending` kept; restart retries exactly 3 attempts and keeps `pending` |
+| Full suite | PASS | `bun test` exit 0: 117 pass, 0 fail, 14 files (112 baseline + 5) |
+| TypeScript | PASS | `bunx tsc --noEmit` exit 0 |
+
+Live proof (worktree code, isolated temp profile, three passes; commands: seed
+`OMP_OPTCHAT_HOME=/tmp/glm-durable/home bun scripts/seed-notes.ts p 1700` → view 126,390 B,
+then per run `cd /tmp/glm-durable/cwd && OMP_OPTCHAT_DUMP_DIR=/tmp/glm-durable/dumps/runN omp -p
+--no-title --no-extensions -e /home/ukd/projects/omp-optchat-durable/src/index.ts --optchat p "<prompt>"`):
+run1 "Standing rule from now on: always end every answer with BANANA. Reply OK."; run2 "Reply OK.";
+run3 "The BANANA rule is done, drop it. Reply OK."; runs 4–7 "Use bash once: sed -n 1,60p
+/home/ukd/projects/omp-optchat/src/memory.ts. Then reply with its first word only."; run 8 (extra,
+opening-stability) "Reply OK.". Every run rc=0 in all passes. Ledger after every run (pass 3):
+
+| After run | ledger.json | Note |
+|---|---|---|
+| 1 | `{"through":1699,"items":[]}` | first ledger from background backfill (0 eligible seeds) |
+| 2–5 | `{"through":1699,"items":[]}` | no pending work, no start consolidation, block unchanged |
+| 6 | `{"through":1699,"items":[],"pending":1716}` | batch checkpoint written synchronously; close aborted the model call; marker survived |
+| 7 | `{"through":1716,"items":[]}` | first settle waited for the replay; `through` advanced past 1704; `pending` cleared |
+| 8 | `{"through":1716,"items":[]}` | unchanged |
+
+Passes 1 and 2 matched exactly (`pending`:1716 / `pending`:1717 → `through` 1716 / 1717).
+orders.jsonl held exactly `i=1700 [{"text":"always end every answer with BANANA","kind":"rule"}]`
+and `i=1704 [{"retire":["BANANA rule"]}]` — the orchestrator's evidence. Consolidated items are
+empty, so BANANA is absent from every opening and `<orders>` renders nothing.
+
+Openings (provider payloads via OMP_OPTCHAT_DUMP_DIR, pass 3): run 6 request 1 view head block
+238 chars / 431 request blocks (pre-batch, 1717 raw lines); run 7 request 1 after the blocking
+replay: head block 722 chars / 107 blocks (merged view) — no BANANA anywhere; run 7 request 2 and
+run 8 request 1 first blocks byte-identical to run 7 request 1 (722 chars, `==` true). The view
+rewrite and any orders change travel together; between rewrites the opening is byte-stable.
+
+Per-call usage (pass 3 session jsonls, in/cacheRead/cacheWrite/output): run1 4/91291/0/9;
+run2 4/91320/0/70; run3 4/91363/0/31; run4 4/91432/0/172 + 2/91432/1664/3; run5 4/91375/401/113 +
+2/91776/1605/3; run6 4/91375/706/186 + 2/92081/1678/3; run7 4/35323/46962/190 + 2/82285/1682/3
+(the one legitimate batch rewrite: merged view written, ≥70% still read from cache); run8
+4/81933/655/4. Sessions under `/home/ukd/.omp/agent/sessions/-tmp-glm-durable-cwd/` (removed with
+the temp dirs at cleanup). Commit: on `ledger-durable`; no install/push/merge/publish; the owner's
+live profile was never touched.

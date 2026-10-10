@@ -8,6 +8,7 @@ import type { Entry } from '../src/memory.ts';
 import { cachePayload, splitView } from '../src/cache.ts';
 import { Memory } from '../src/memory.ts';
 import { EXTRACT_ORDERS, CONSOLIDATE_ORDERS, OPTCHAT_PROMPT } from '../src/prompts.ts';
+import { FileStore } from '../src/store.ts';
 const entry = (i: number, text = 'Never push', kind: 'user' | 'talk' = 'user') => ({ i, text, kind, date: '2026-10-10', size: text.length });
 async function fixture(run: (o: Orders, dir: string) => Promise<void>, task: OrderTask = async (task) => task.kind === 'extract' ? ['Never push'] : [{ text: 'Never push', from: [0], date: '2026-10-10' }], entries: Entry[] = [], warn: (text: string) => void = () => {}) {
  const dir = mkdtempSync(join(tmpdir(), 'orders-test-')); const o = new Orders(dir, task, warn, 2, 10);
@@ -204,4 +205,169 @@ test('D empty extraction cannot become a new authority source for an existing go
  writeFileSync(join(dir, 'ledger.json'), JSON.stringify({ through: 0, items: [goal] }));
  const o = new Orders(dir, async input => input.kind === 'extract' ? [] : [{ ...goal, from: [0, 1] }], () => {});
  try { o.append(entry(1, 'Is it done?')); await o.batch(1); expect(o.ledger.items[0].from).toEqual([0]); expect(o.render()).toContain('Watch CP MR !103'); } finally { await o.close(); rmSync(dir, { recursive: true, force: true }); }
+});
+
+// Ledger durability: a batch must leave a pending checkpoint before any merged view is saved, survive an interrupted close,
+// block the first turn after a restart until it lands, and keep the block byte-identical when there is no pending work.
+const ledgerOf = (dir: string): { through: number; items: unknown[]; raw?: unknown[]; retire?: unknown[]; pending?: number } =>
+ JSON.parse(readFileSync(join(dir, 'ledger.json'), 'utf8'));
+const pendingOf = (dir: string) => { try { return ledgerOf(dir).pending; } catch { return undefined; } };
+const BANANA = 'Standing rule from now on: always end every answer with BANANA.';
+const DROP = 'The BANANA rule is done, drop it.';
+/** A batch(1) whose consolidation model call is killed by close(), as when OMP shuts down mid-batch. */
+async function interruptedBatch(dir: string) {
+ const o = new Orders(dir, async (task, signal) => {
+  if (task.kind === 'extract') return task.entry.i === 1 ? [{ retire: ['BANANA rule'] }] : [BANANA];
+  const { promise, reject } = Promise.withResolvers<never>();
+  // A model client rejects at once when the signal was already aborted before the call.
+  if (signal.aborted) reject(Error('closed'));
+  else signal.addEventListener('abort', () => reject(Error('closed')), { once: true });
+  return promise;
+ }, () => {}, 2, 10);
+ o.append(entry(0, BANANA)); await o.extracted();
+ o.append(entry(1, DROP)); await o.extracted();
+ void o.batch(1);
+ expect(pendingOf(dir)).toBe(1);
+ await o.close();
+}
+/** Reopens after an interrupted batch; the consolidation runs once and is gated until `release`, `started` fires when it begins. */
+function reopened(dir: string) {
+ const gate = Promise.withResolvers<void>(), started = Promise.withResolvers<void>();
+ let consolidations = 0;
+ const restored = new Orders(dir, async task => {
+  if (task.kind === 'extract') throw Error('extraction records must already be persisted');
+  consolidations++;
+  started.resolve();
+  await gate.promise;
+  return [];
+ }, () => {}, 2, 10);
+ restored.backfill([entry(0, BANANA), entry(1, DROP)]);
+ return { restored, release: () => gate.resolve(), ran: () => consolidations, started: started.promise };
+}
+const opening = (orders: string) => projectContext([{ role: 'user', content: 'hello', timestamp: 1 }], 0, '<chat>\n0+1|user: hello\n</chat>', '', true, 'main', 1, orders)[0];
+
+test('batch checkpoints pending in ledger.json synchronously and before the merged view is saved', async () => {
+ await fixture(async (o, dir) => {
+  o.append(entry(0, BANANA));
+  await o.extracted();
+  const saving = o.batch(0);
+  expect(pendingOf(dir)).toBe(0);
+  await saving;
+  expect(ledgerOf(dir).through).toBe(0);
+  expect(pendingOf(dir)).toBeUndefined();
+ });
+ const dir = mkdtempSync(join(tmpdir(), 'orders-checkpoint-'));
+ const proto = FileStore.prototype.saveView;
+ let saves = 0, pendingAtViewSave: unknown = 'no view save after open';
+ const viewSaved = Promise.withResolvers<void>();
+ FileStore.prototype.saveView = function (this: FileStore, view: string) {
+  if (this.directory === dir && ++saves > 1) {
+   try { pendingAtViewSave = ledgerOf(dir).pending; } catch { pendingAtViewSave = 'no ledger yet'; }
+   viewSaved.resolve();
+  }
+  return proto.call(this, view);
+ };
+ const gate = Promise.withResolvers<void>();
+ let memory: Memory | undefined;
+ try {
+  memory = await Memory.open(dir, async () => 's'.repeat(100), () => {}, 200, 2, async task => {
+   if (task.kind === 'extract') return [task.entry.text];
+   await gate.promise;
+   return [{ text: BANANA, kind: 'rule', from: [0], date: '2026-10-10' }];
+  });
+  memory.append('user', `${BANANA} ${'x'.repeat(600)}`);
+  await memory.settle(undefined, 'tree');
+  memory.append('user', `also keep this ${'x'.repeat(600)}`);
+  await memory.settle(undefined, 'tree');
+  memory.append('user', `and this one forces the first merge ${'x'.repeat(600)}`);
+  const settling = memory.settle(undefined, 'tree');
+  await viewSaved.promise;
+  expect(pendingAtViewSave).toBe(2);
+  expect(pendingOf(dir)).toBe(2);
+  gate.resolve();
+  await settling;
+  expect(ledgerOf(dir).through).toBe(2);
+  expect(pendingOf(dir)).toBeUndefined();
+ } finally { FileStore.prototype.saveView = proto; await memory?.close(); rmSync(dir, { recursive: true, force: true }); }
+});
+
+test('close during a batch keeps pending and the restart blocks the first settle until consolidation lands', async () => {
+ const dir = mkdtempSync(join(tmpdir(), 'orders-interrupt-'));
+ try {
+  await interruptedBatch(dir);
+  expect(pendingOf(dir)).toBe(1);
+  expect(ledgerOf(dir).through).toBe(-1);
+  const { restored, release, ran, started } = reopened(dir);
+  let settled = false;
+  const first = restored.settle().then(() => { settled = true; });
+  await started;
+  expect(ran()).toBe(1);
+  expect(settled).toBe(false);
+  release();
+  await first;
+  expect(ledgerOf(dir).through).toBe(1);
+  expect(pendingOf(dir)).toBeUndefined();
+  expect(restored.render()).not.toContain('BANANA');
+  await restored.close();
+ } finally { rmSync(dir, { recursive: true, force: true }); }
+});
+
+test('two consecutive turns after the replayed consolidation render byte-identical openings', async () => {
+ const dir = mkdtempSync(join(tmpdir(), 'orders-stable-'));
+ try {
+  await interruptedBatch(dir);
+  const { restored, release, started } = reopened(dir);
+  const first = restored.settle();
+  await started;
+  release();
+  await first;
+  expect(ledgerOf(dir).through).toBe(1);
+  expect(restored.render()).not.toContain('BANANA');
+  const afterReplay = restored.render(), blocks = opening(restored.render());
+  await restored.settle();
+  expect(restored.render()).toBe(afterReplay);
+  expect(opening(restored.render())).toEqual(blocks);
+  await restored.close();
+ } finally { rmSync(dir, { recursive: true, force: true }); }
+});
+
+test('restart with no pending work renders a byte-identical orders block', async () => {
+ await fixture(async (o, dir) => {
+  o.append(entry(0, 'Always verify claims before answering.'));
+  await o.batch(0);
+  const before = o.render();
+  await o.close();
+  const restored = new Orders(dir, async task => { if (task.kind !== 'extract') throw Error('must not consolidate at start'); return []; }, () => {}, 2, 10);
+  restored.backfill([entry(0, 'Always verify claims before answering.')]);
+  await restored.settle();
+  expect(restored.render()).toBe(before);
+  await restored.close();
+ });
+});
+
+test('consolidation failing after retries keeps pending and renders raw orders for the pending range', async () => {
+ let attempts = 0;
+ await fixture(async (o, dir) => {
+  o.append(entry(0, 'Always verify claims before answering.'));
+  await o.extracted();
+  await o.batch(0);
+  expect(attempts).toBe(3);
+  expect(o.render()).toContain('Always verify claims');
+  const saved = ledgerOf(dir);
+  expect(saved.through).toBe(-1);
+  expect(saved.raw).toHaveLength(1);
+  expect(saved.pending).toBe(0);
+  let retries = 0;
+  const restored = new Orders(dir, async task => {
+   if (task.kind === 'extract') return [];
+   retries++;
+   throw Error('offline');
+  }, () => {}, 2, 10);
+  restored.backfill([entry(0, 'Always verify claims before answering.')]);
+  await restored.settle();
+  expect(retries).toBe(3);
+  expect(pendingOf(dir)).toBe(0);
+  expect(restored.render()).toContain('Always verify claims');
+  await restored.close();
+ }, async task => task.kind === 'extract' ? [task.entry.text] : (attempts++, Promise.reject(Error('offline'))));
 });

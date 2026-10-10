@@ -126,20 +126,20 @@ export class Memory {
   /** Opens the memory in `directory` through the store `storeFor` picks, after its load. */
   static async open(directory: string, compress: Compressor, warn: (s: string) => void = console.error, budget = VIEW, jobs = 8, orderTask?: OrderTask) {
     const store = storeFor(directory, warn);
-    const memory = new Memory({ directory, store, saved: await store.load() }, compress, warn, budget, jobs);
-    if (orderTask) { memory.orders = new Orders(directory, orderTask, warn, jobs); memory.orders.backfill(memory.root); }
-    return memory;
+    // Orders is attached before construction so merges while replaying the saved view checkpoint `pending` and wait for their records.
+    const orders = orderTask ? new Orders(directory, orderTask, warn, jobs) : undefined;
+    return new Memory({ directory, store, saved: await store.load(), orders }, compress, warn, budget, jobs);
   }
   /** A directory alone opens a FileStore there. `jobs`: summaries built at once, and how many unbuilt lines a new message's node
    * waits behind. The main chat keeps at most eight workers. */
-  constructor(source: string | { directory: string; store: Store; saved: Saved }, private readonly compress: Compressor,
+  constructor(source: string | { directory: string; store: Store; saved: Saved; orders?: Orders }, private readonly compress: Compressor,
     private readonly warn: (s: string) => void = console.error,
     readonly budget = VIEW, private readonly jobs = 8, private readonly retryMs = 10_000) {
     this.chat = new Sawtooth(budget, budget / 2, part => this.node(part));
     this.compaction = new Sawtooth(budget / 4, budget / 8, part => this.node(part));
     let saved: Saved;
     if (typeof source === 'string') { const store = new FileStore(source, warn); this.directory = source; this.store = store; saved = store.load(); }
-    else ({ directory: this.directory, store: this.store, saved } = source);
+    else ({ directory: this.directory, store: this.store, saved, orders: this.orders } = source);
     const log = saved.entries;
     const entries = log.every(isEntry) ? log.sort((a, b) => a.i - b.i) : undefined;
     if (!entries || entries.some((entry, i) => entry.i !== i)) throw new Error('Invalid/noncontiguous OptChat log; refusing to change it.');
@@ -151,6 +151,9 @@ export class Memory {
     }
     for (const node of this.tree.values()) this.queueParent(node);
     for (let i = 0; i < this.root.length; i++) if (!this.node({ l: 0, i })) this.unbuilt.add(i);
+    // Before any view merge can run: backfill queues extraction, replays a saved `pending` batch as blocking work, and
+    // lets every merge below checkpoint the ledger before the view is saved.
+    this.orders?.backfill(this.root);
     // Refolding the log gives a different view than the live one, and every cache entry would miss, so the view is saved.
     const loaded = this.load(saved.view);
     for (const part of this.view) this.compaction.push(part);

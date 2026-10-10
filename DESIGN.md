@@ -139,6 +139,21 @@ oversized output. Three failed attempts retain old ledger plus raw new orders; `
 optional `raw` field durably preserves this fallback without advancing `through`. Next batch
 tries again. A lossless failure fallback may exceed the normal consolidated bound.
 
+Batch requests are durable. Calling `batch(P)` synchronously and atomically writes
+`pending: P` into `ledger.json` — keeping `through`, `items`, `raw` and `retire` — before the
+merge that requested it can save `view.json`, so no crash window can hold a merged view whose
+consolidation is unmarked. `Orders` is attached before `Memory`'s constructor replays the saved
+view and its backfill runs there, so startup merges checkpoint too (and wait for their
+extractions, since `through` may only advance over persisted records). A consolidation that
+lands while a newer batch is already checkpointed re-stamps that newer `pending`, keeping the
+marker contiguous. `close()` aborts the model call but never drops the marker. At open, saved
+`pending` greater than `through` replays as blocking work — extraction of the range, then
+consolidation — and the first turn's settle waits for it; a restart with no pending work and an
+existing ledger consolidates nothing, leaving the orders block byte-identical. Only a profile's
+very first ledger (backfill with no ledger at all) stays background. If the replayed or next
+consolidation fails all three attempts again, raw orders for `(through, pending]` render and
+`pending` stands for the next attempt.
+
 The `<orders>` text block precedes the separate `<chat>` block in the same opening user message.
 Cache splitting still starts at `<chat>` and uses the identical four-line partition; no ledger
 line shifts a view cache mark. The static turn paragraph contains no dates. Tools/system retain

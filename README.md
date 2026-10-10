@@ -129,11 +129,17 @@ Profile files:
   instructions with `jq '.items' ~/.omp/optchat/main/ledger.json`; newest source id labels each item.
   After failed consolidation, optional `raw` stores unconsolidated orders and `retire` stores
   pending user retirement targets beside the old snapshot, so restart preserves the fallback.
+  A batch that has started but not landed also writes `pending: N` here, before the merge that
+  requested it can save the view, so a crash or a closed window can never lose it: the next start
+  re-runs that consolidation before the first request.
 
 Consolidated rendered orders are bounded to 16,000 UTF-8 bytes. Oversized or invalid outputs retry,
 never truncate. If consolidation fails three attempts, old instructions plus raw new orders are
-rendered losslessly (this fallback can exceed the bound), and consolidation retries at the next batch.
-Between batches the orders prefix is byte-identical, preserving the prompt cache.
+rendered losslessly (this fallback can exceed the bound), and consolidation retries at the next batch
+(or at the next start, while `pending` stands). Between batches the orders prefix is byte-identical,
+preserving the prompt cache. Closing OMP mid-consolidation aborts the model call but leaves `pending`
+on disk; the first turn after the restart waits for that consolidation, and only a profile's very
+first ledger (background backfill) may appear without a view rewrite.
 
 
 ## What it changes in OMP (only when the flag is set)

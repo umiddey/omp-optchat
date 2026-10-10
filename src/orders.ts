@@ -61,6 +61,9 @@ export class Orders {
  private controller = new AbortController();
  private publication: Promise<void> = Promise.resolve();
  private bootstrap: Promise<void> = Promise.resolve();
+ /** Batch point saved in ledger.json whose consolidation has not landed yet; blocks the first turn after a restart. */
+ private pendingThrough?: number;
+ private replay?: Promise<void>;
  private stopped = false;
  private loaded = false;
  private changed = new Set<() => void>();
@@ -77,6 +80,10 @@ export class Orders {
    const saved = JSON.parse(readFileSync(ledger, 'utf8'));
    if (!Number.isSafeInteger(saved.through) || saved.through < -1) throw Error('Invalid ledger boundary.');
    this.ledger = { through: saved.through, items: items(saved.items) }; this.loaded = true;
+   if (saved.pending !== undefined) {
+    if (!Number.isSafeInteger(saved.pending) || saved.pending < -1) throw Error('Invalid pending batch marker.');
+    if (saved.pending > saved.through) this.pendingThrough = saved.pending;
+   }
    if (saved.raw !== undefined) this.raw = items(saved.raw);
    if (saved.retire !== undefined) {
     if (!Array.isArray(saved.retire)) throw Error('Invalid pending retirements.');
@@ -89,8 +96,14 @@ export class Orders {
  }
  backfill(entries: readonly Entry[]) {
   for (const e of entries) this.append(e);
-  if (entries.length && !this.loaded) {
-   const through = entries.length - 1;
+  const through = entries.length - 1;
+  if (this.pendingThrough !== undefined && this.pendingThrough > this.ledger.through) {
+   // A restart interrupted this consolidation (see `pending` in ledger.json): finishing it is blocking work.
+   const pending = this.pendingThrough;
+   this.replay = this.extracted(pending).then(() => this.batch(pending)).catch(error => {
+    if (!this.stopped) this.warn(`Orders replay: ${String(error)}`);
+   });
+  } else if (entries.length && !this.loaded) {
    this.bootstrap = this.extracted(through).then(() => this.batch(through)).catch(error => {
     if (!this.stopped) this.warn(`Orders backfill: ${String(error)}`);
    });
@@ -143,7 +156,18 @@ export class Orders {
    });
   }
  }
+ /** Synchronously rewrites ledger.json: the current ledger plus optional extras. A batch's `pending` marker must be on
+  * disk before the merge that requested it can save the view, so this never waits. */
+ private writeLedger(extra: { pending?: number }) {
+  atomicWrite(join(this.directory, 'ledger.json'), JSON.stringify({
+   ...this.ledger, ...(this.raw.length ? { raw: this.raw } : {}), ...(this.retire.length ? { retire: this.retire } : {}), ...extra,
+  }));
+ }
  batch(through: number) {
+  if (!this.stopped && through > this.ledger.through && through !== this.pendingThrough) {
+   this.pendingThrough = through;
+   this.writeLedger({ pending: through });
+  }
   this.publication = this.publication.then(async () => {
    await this.extracted(through);
    const records = [...this.records.values()].filter(r => r.i > this.ledger.through && r.i <= through).sort((a, b) => a.i - b.i);
@@ -169,18 +193,24 @@ export class Orders {
      item.date = sources.get(Math.max(...item.from))!;
     }
     if (Buffer.byteLength(renderOrders(next, through), 'utf8') > ORDER_LIMIT) throw Error('Ledger exceeds 16000 UTF-8 bytes; combine related orders without dropping any.');
-    const saved = { through, items: next };
-    atomicWrite(join(this.directory, 'ledger.json'), JSON.stringify(saved)); this.ledger = saved; this.raw = []; this.retire = []; this.loaded = true; return;
+    // A newer batch may already be checkpointed; keep its marker when this older consolidation lands first.
+    const pendingAgain = this.pendingThrough !== undefined && this.pendingThrough > through ? { pending: this.pendingThrough } : {};
+    if (this.pendingThrough === through) this.pendingThrough = undefined;
+    const saved = { through, items: next, ...pendingAgain };
+    atomicWrite(join(this.directory, 'ledger.json'), JSON.stringify(saved)); this.ledger = { through, items: next }; this.raw = []; this.retire = []; this.loaded = true; return;
    } catch (error) { if (this.stopped) return; this.warn(`Orders consolidation: ${String(error)}`); }
    this.raw = records.flatMap(r => r.orders.flatMap(order => 'retire' in order ? [] : [{ ...order, from: [r.i], date: r.date }]));
    this.retire = targets;
-   atomicWrite(join(this.directory, 'ledger.json'), JSON.stringify({ ...this.ledger, raw: this.raw, ...(targets.length ? { retire: targets } : {}) }));
+   // Failed after its retries: raw orders stay rendered and `pending` survives for the next attempt (this session's next batch or a restart).
+   this.writeLedger({ pending: Math.max(through, this.pendingThrough ?? through) });
   }).catch(error => { if (!this.stopped) this.warn(`Orders publication: ${String(error)}`); });
   return this.publication;
  }
  async settle(signal?: AbortSignal, backgroundBackfill = false) {
   signal?.throwIfAborted();
-  const work = backgroundBackfill ? this.publication : Promise.all([this.bootstrap, this.publication]);
+  // Replayed pending work always blocks a turn; the first backfill's consolidation blocks only a foreground wait.
+  const work = backgroundBackfill ? Promise.all([this.publication, this.replay ?? Promise.resolve()])
+   : Promise.all([this.bootstrap, this.publication, this.replay ?? Promise.resolve()]);
   await Promise.race([work, new Promise<never>((_, reject) => {
    if (!signal) return;
    const abort = () => reject(Error('Orders wait cancelled.'));
@@ -189,5 +219,5 @@ export class Orders {
   })]);
  }
  render() { return renderOrders([...this.ledger.items, ...this.raw].filter(item => !retired(item, this.retire)), this.ledger.through); }
- async close() { this.stopped = true; this.controller.abort(); clearTimeout(this.timer); this.notify(); await Promise.allSettled(this.busy.values()); await this.publication; await this.bootstrap; }
+ async close() { this.stopped = true; this.controller.abort(); clearTimeout(this.timer); this.notify(); await Promise.allSettled(this.busy.values()); await Promise.all([this.publication, this.bootstrap, this.replay ?? Promise.resolve()]); }
 }
