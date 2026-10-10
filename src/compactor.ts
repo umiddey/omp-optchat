@@ -4,6 +4,8 @@ import type { ModelRegistry } from '@oh-my-pi/pi-coding-agent';
 import { COMPACT, compaction, tooLong } from './prompts.ts';
 import { bytes, NODE, type Compressor } from './memory.ts';
 import { cachePayload, splitView } from './cache.ts';
+import { EXTRACT_ORDERS, CONSOLIDATE_ORDERS } from './prompts.ts';
+import type { OrderTask } from './orders.ts';
 
 export interface ModelChoice { provider: string; model: string; thinking: ThinkingLevel }
 /** OMP's streamSimple resolves the selected effort against the model's capabilities. */
@@ -80,5 +82,23 @@ export function createCompressor(registry: ModelRegistry, choice: () => ModelCho
       messages.push({ role: 'user', content: tooLong(bytes(line), cut), timestamp: Date.now() });
     }
     return tries.reduce((a, b) => bytes(a) <= bytes(b) ? a : b);
+  };
+}
+
+/** Orders reuse the profile's compactor model and effort, but never enter the summary tree. */
+export function createOrderTask(registry: ModelRegistry, choice: () => ModelChoice,
+  onUsage: (message: AssistantMessage) => void = () => {}): OrderTask {
+  return async (input, signal) => {
+    const selected = choice(), model = registry.find(selected.provider, selected.model);
+    if (!model) throw Error(`Compactor model unavailable: ${selected.provider}/${selected.model}`);
+    const messages: Message[] = [{ role: 'user', content: JSON.stringify(input), timestamp: Date.now() }];
+    const reply = await streamSimple(model, {
+      systemPrompt: [input.kind === 'extract' ? EXTRACT_ORDERS : CONSOLIDATE_ORDERS], messages,
+    }, { apiKey: await registry.getApiKey(model), sessionId: 'optchat-orders', reasoning: reasoningFor(model, selected.thinking),
+      signal, cacheRetention: 'short' }).result();
+    onUsage(reply);
+    if (reply.stopReason === 'error' || reply.stopReason === 'aborted') throw Error(reply.errorMessage ?? `Orders ${reply.stopReason}`);
+    const text = reply.content.filter(c => c.type === 'text').map(c => c.text).join('').trim();
+    return JSON.parse(text.replace(/^```(?:json)?\s*/, '').replace(/\s*```$/, ''));
   };
 }

@@ -2,7 +2,7 @@
 
 OptChat (Victor Taelin's recipe) as an OMP 18.8.3 extension. One chat that never ends: every message is
 logged, compressed into a binary tree of ≤512-byte lines, and each turn the model sees
-`[tools][system][view][current turn]` instead of the OMP session history.
+`[tools][system][orders][view][current turn]` instead of the OMP session history.
 
 Sources (read-only references):
 - Recipe: https://gist.github.com/VictorTaelin/91837951a5ce5b38f341ec1ba1df6449 (the spec; section numbers below refer to it).
@@ -37,9 +37,9 @@ their results are logged like any tool result.
 
 ### Recipe conformance and deliberate operational deviations
 
-The static OptChat prompt follows recipe §5 verbatim, renaming Unii→OptChat and unii→talk
+The compaction prompt follows recipe §5 verbatim, renaming Unii→OptChat and unii→talk
 (the persisted reply kind). The device-tools paragraph is omitted because this extension exposes no device tools.
-Compaction tasks, the 512-dash ruler, and too-long retry text follow §4 verbatim.
+The turn prompt adds a static standing-orders paragraph; compaction tasks, the ruler, and too-long retry text follow §4 verbatim.
 New nodes use the restored prompt; persisted nodes are never rebuilt or migrated.
 
 Compactors deliberately send their own system prompt, without OMP's system instructions or tools.
@@ -68,6 +68,36 @@ The same accounting applies to the 64 KB low bound and 16–32 KB compaction vie
 The recipe's node records store `size`, but its prose is ambiguous about framing.
 We deliberately keep existing accounting: framing is a few percent and changing it
 would rewrite an existing profile's view and invalidate its cache continuity.
+
+### Deliberate extension: standing orders outside the tree
+
+The recipe's time-shaped merges squeeze two 512-byte lines into one. In the owner's measured
+case, message 24's full PM goal shortened at 16+16 and disappeared at 0+32. A replay of
+135 compactions retained only 16/30 lost orders, and 0/18 full PM goals, even with the exact
+recipe prompt and Haiku xhigh. Prompt tuning cannot provide durable standing-order storage.
+
+`src/orders.ts` therefore owns an independent append-only extraction log and atomic ledger.
+Every genuine user log entry (excluding any `[customType] ` shown-message prefix) gets one
+background model extraction, including an empty-array record. The profile compactor model/effort
+is reused; failures retry with the compactor's ten-second availability policy. Duplicate ids
+are never appended. Backfill extracts missing historical ids on session start without blocking
+a normal turn, then creates the first ledger once; saved ledgers are never recomputed on restart.
+
+Only a chat view merge batch publishes subsequent ledger changes. Its inclusive message point
+selects extraction records after `ledger.through`; the turn waits for extraction and consolidation
+at that boundary, like summary completion. New view and ledger are captured together for the
+run. Later contradictions revoke/replace older wording; duplicates merge with source ids.
+The rendered consolidated block must be <=16000 UTF-8 bytes; validation rejects, not truncates,
+oversized output. Three failed attempts retain old ledger plus raw new orders; `ledger.json`'s
+optional `raw` field durably preserves this fallback without advancing `through`. Next batch
+tries again. A lossless failure fallback may exceed the normal consolidated bound.
+
+The `<orders>` text block precedes the separate `<chat>` block in the same opening user message.
+Cache splitting still starts at `<chat>` and uses the identical four-line partition; no ledger
+line shifts a view cache mark. The static turn paragraph contains no dates. Tools/system retain
+their own fallback mark. Between view rewrites the orders bytes are identical; the first backfill
+publication permits one cache rewrite. The ledger never modifies tree nodes or rebuilds the view.
+
 
 ## Turn integration (OMP hooks)
 

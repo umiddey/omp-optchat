@@ -79,9 +79,39 @@ Existing profile configs keep their explicit effort. New prompts affect only new
 sessions. Off, the view and `zoom` are the only memory and each turn start writes about 1k fewer tokens to the cache.
 Plain OMP sessions keep their recall either way; OMP still saves facts from OptChat sessions for them.
 
+## Standing orders ledger
+
+OptChat keeps standing goals, rules, constraints, prohibitions, preferences and decisions outside
+the summary tree, near-verbatim. They appear as an `<orders>` block before `<chat>` on every
+request. New orders remain in recent view lines until the next view merge batch, when the ledger
+is consolidated: newest contradictory instructions replace earlier ones, and duplicates merge.
+The static turn prompt gives orders priority over conflicting summaries; `zoom(id, 1)` gives context.
+This is a deliberate extension beyond Taelin's recipe, not a change to existing summary nodes.
+
+No extra config: extraction and consolidation use `compactor`'s model and effort. Extraction runs
+in the background (up to eight workers), ignores shown custom-message tags, and records even
+messages containing no standing order. Existing profiles backfill missing ids once in the background;
+their first ledger appears at a subsequent turn start after completion. Normal turns do not wait
+for extraction; a view rewrite waits for its consolidation with the usual working message.
+
+Profile files:
+- `orders.jsonl`: append-only, flushed `{i,date,orders:[strings]}` extraction records. Open it as
+  JSONL, or use `jq -c 'select(.orders | length > 0)' ~/.omp/optchat/main/orders.jsonl`.
+- `ledger.json`: atomic `{through,items:[{text,from:[ids],date}]}` snapshot, loaded without
+  recomputation at restart. `through` is the inclusive last incorporated message id. Read active
+  instructions with `jq '.items' ~/.omp/optchat/main/ledger.json`; newest source id labels each item.
+  After failed consolidation, optional `raw` stores unconsolidated orders beside the old snapshot,
+  so restart also preserves the fallback.
+
+Consolidated rendered orders are bounded to 16,000 UTF-8 bytes. Oversized or invalid outputs retry,
+never truncate. If consolidation fails three attempts, old instructions plus raw new orders are
+rendered losslessly (this fallback can exceed the bound), and consolidation retries at the next batch.
+Between batches the orders prefix is byte-identical, preserving the prompt cache.
+
+
 ## What it changes in OMP (only when the flag is set)
 
-- The model sees `[tools][system][memory view][current turn]`; OMP's own history stays on disk but is not sent.
+- The model sees `[tools][system][orders][memory view][current turn]`; OMP's own history stays on disk but is not sent.
 - OMP's auto-compaction is turned off for that session.
 - Per-turn memory recall (`<memories>`) is dropped (or, with `"memories": true`, moved after the view), and the
   date/cwd reminder is moved after the view, so neither invalidates the cached view.

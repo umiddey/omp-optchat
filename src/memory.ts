@@ -1,6 +1,7 @@
 import { EventEmitter } from 'node:events';
 import { FileStore, storeFor, type Saved, type Store } from './store.ts';
 import { pageText } from './paging.ts';
+import { Orders, type OrderTask } from './orders.ts';
 
 export const NODE = 512;
 export const VIEW = 128_000;
@@ -120,11 +121,14 @@ export class Memory {
   readonly directory: string;
   readonly store: Store;
   lastError?: string;
+  orders?: Orders;
 
   /** Opens the memory in `directory` through the store `storeFor` picks, after its load. */
-  static async open(directory: string, compress: Compressor, warn: (s: string) => void = console.error, budget = VIEW, jobs = 8) {
+  static async open(directory: string, compress: Compressor, warn: (s: string) => void = console.error, budget = VIEW, jobs = 8, orderTask?: OrderTask) {
     const store = storeFor(directory, warn);
-    return new Memory({ directory, store, saved: await store.load() }, compress, warn, budget, jobs);
+    const memory = new Memory({ directory, store, saved: await store.load() }, compress, warn, budget, jobs);
+    if (orderTask) { memory.orders = new Orders(directory, orderTask, warn, jobs); memory.orders.backfill(memory.root); }
+    return memory;
   }
   /** A directory alone opens a FileStore there. `jobs`: summaries built at once, and how many unbuilt lines a new message's node
    * waits behind. The main chat keeps at most eight workers. */
@@ -176,6 +180,7 @@ export class Memory {
       this.warn(`Memory could not be saved: ${this.failed}`);
     });
     this.root.push(entry); this.push(entry.i); if (this.fit()) this.save(); this.schedule();
+    this.orders?.append(entry);
     return entry;
   }
   node(part: Part) { return this.tree.get(key(part)); }
@@ -242,6 +247,7 @@ export class Memory {
   private fit(total = this.root.length) {
     const merged = this.chat.fit(total);
     this.compaction.fit(total, merged);
+    if (merged) void this.orders?.batch(total - 1);
     const owed = this.owed();
     this.peak = owed > 0 ? Math.max(this.peak, owed) : 0;
     this.events.emit('change');
@@ -319,7 +325,7 @@ export class Memory {
   async settle(signal?: AbortSignal, until: 'turn' | 'tree' = 'turn'): Promise<void> {
     const done = () => until === 'tree' ? this.ready && this.busy.size === 0 && this.tree.size === this.expectedNodes()
       : this.ready || this.stalled;
-    if (done()) return;
+    if (done()) { await this.orders?.settle(signal, true); return; }
     if (this.stopped || signal?.aborted) throw new Error('Memory wait cancelled.');
     await new Promise<void>((resolve, reject) => {
       const cleanup = () => { this.events.off('change', check); signal?.removeEventListener('abort', abort); };
@@ -327,6 +333,7 @@ export class Memory {
       const check = () => { if (this.stopped) abort(); else if (done()) { cleanup(); resolve(); } };
       this.events.on('change', check); signal?.addEventListener('abort', abort, { once: true }); check();
     });
+    await this.orders?.settle(signal, true);
   }
   private expectedNodes() {
     let count = 0;
@@ -357,5 +364,6 @@ export class Memory {
   async close() {
     this.stopped = true; this.controller.abort(); clearTimeout(this.retryTimer);
     this.events.emit('change'); await Promise.allSettled(this.busy.values()); await this.writing;
+    await this.orders?.close();
   }
 }

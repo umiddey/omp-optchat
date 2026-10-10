@@ -361,3 +361,68 @@ order retention (11→16/30) but did not preserve the full goal. Xhigh averaged
 Three samples on selected failure cases do not establish a general guarantee.
 Recipe restoration affects new nodes only; existing losses remain recoverable
 only by zooming to original messages, not by a prohibited migration.
+
+## Orders ledger — orders-ledger (2026-10-10)
+
+Implemented the deliberate standing-orders extension in `src/orders.ts`, with task prompts and
+compactor-model transport, Memory batch/turn lifecycle wiring, and a separate text block before
+the chat view. Extraction is background, append-only and flushed, including empty results;
+shown-custom user entries are excluded. Atomic ledger snapshots load without recomputation.
+Only view merge batches (plus the first background backfill) change the prefix. Consolidation
+failures retain old plus raw orders durably and retry next batch; oversized model output is
+rejected rather than truncated. README and DESIGN describe files, cache partition and semantics.
+
+### Acceptance
+
+Commands run from `/home/ukd/projects/omp-optchat-ledger`.
+
+| Check | PASS/FAIL | Evidence |
+|---|---|---|
+| Final complete suite | PASS | `bun test && bun run typecheck`, exit 0; 98 pass, 0 fail, 14 files, 63 expect calls |
+| TypeScript | PASS | `bun run typecheck` invokes `tsc --noEmit`, exit 0 |
+| Existing cut/rollover and cache I1–I7 | PASS | Included in full 98-test suite; no skipped tests or weakened assertions |
+| Exact recipe compactor and explicit turn extension | PASS | Exact whole-string assertions retained; turn equality now includes the exact static paragraph |
+| Red-first suite | PASS (module-load red only) | Before orders implementation, `bun test test/orders.test.ts`, exit 1: missing src/orders.ts; 0 pass, 1 fail, 1 error |
+| Independent assertion-level red per scenario | FAIL (not exercised) | The initial six tests shared that module-load failure, so their assertions did not run independently |
+
+| Initial ledger test | Red evidence | Final |
+|---|---|---|
+| Every user record including [], custom skip | Shared missing-module failure before implementation | PASS |
+| Only batch consolidation, persisted load without recompute | Shared missing-module failure before implementation | PASS |
+| Render position, stable opening between batches | Shared missing-module failure before implementation | PASS |
+| Failed consolidation raw fallback | Shared missing-module failure before implementation | PASS |
+| 16000 UTF-8 byte bound | Shared missing-module failure before implementation | PASS |
+| Missing-id backfill once | Shared missing-module failure before implementation | PASS |
+
+Four later tests cover nonempty-ledger cache marks, background backfill plus fallback restart,
+actual Memory view-batch integration, and extraction failure/concurrency/one-record persistence.
+They passed in the final suite; no preimplementation red is claimed for them.
+Initial full run was 93 pass/1 fail because the old turn-prompt recipe-equality test did not include
+the deliberate extension. Its exact assertion was updated, not removed or weakened.
+Dependencies were linked from the existing checkout; no install, push, merge or publish.
+
+### Copied real-memory backfill
+
+`bun scripts/ledger-eval.ts` (temporary script removed after measurement), exit 0.
+Used only copied profile and copied credentials; no writes to the owner's held profile.
+Model: default `anthropic/claude-haiku-5-5`, xhigh.
+
+| Measurement | PASS/FAIL | Result |
+|---|---|---|
+| Snapshot/skip accounting | PASS | 3785 entries, 188 user entries, 92 custom-tagged skipped, 96 genuine user extraction records |
+| Order extraction and consolidation | PASS | 86 extracted strings, 23 consolidated items, 97 calls (96 extraction + 1 consolidation) |
+| Rendered ledger bound | PASS | 5819 UTF-8 bytes, below 16000 |
+| Message 24 PM goal | PASS | Full every-endpoint/table, witnessed real UI, 0 waived, 0 baselined retained at newest duplicate source 3522; push-PM-when-green clause retained at 24 |
+| Conditional no-verify push | PASS | Real source id 2681; permission and eventual-fix condition both present |
+| “Exclude and delete” | FAIL (absent) | Real id 3234 says `eclude and delete, yeah.`; extraction [], consistent with excluding single-action approvals |
+| Cost/wall time | PASS | Model-reported $0.045765575; backfill+consolidation 192.253 seconds (command 194.22 seconds) |
+
+Full rendered block and every extraction record remain in `/tmp/optchat-ledger-results.md`.
+Five false-positive candidates: 406 “after this you may do what you wer esuggesting me to”;
+637 “use sol”; 891 “use a GLM agent to implement the OIA agent, internet and attachment thing”;
+2849 “if it is good then you can push it into main and yes, install it and restart”;
+3634 the “You can do number one, but before…” approval/reporting task.
+These look like one-off assignments/approvals, not standing orders. Model consolidation also
+inserted editorial parentheticals and normalized some wording: near-verbatim is not a claim
+of exact transcription. No id-specific whitelist or special case was used.
+

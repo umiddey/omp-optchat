@@ -4,7 +4,7 @@ import type { ExtensionAPI, ExtensionContext } from '@oh-my-pi/pi-coding-agent';
 import { lookup } from '@oh-my-pi/pi-coding-agent/config/registry';
 import type { AgentMessage } from '@oh-my-pi/pi-agent-core';
 import { Memory } from './memory.ts';
-import { createCompressor } from './compactor.ts';
+import { createCompressor, createOrderTask } from './compactor.ts';
 import { defaults, profilePath, loadConfig, firstRun, WELCOME } from './config.ts';
 import { lockProfile } from './profiles.ts';
 import { asUser, boundedMessage, logMessage } from './transcript.ts';
@@ -21,7 +21,7 @@ export default function optchat(pi: ExtensionAPI) {
   let run: AgentMessage[] = [], logged = 0, running = false;
   /** The run's first message as OMP holds it (asUser turns shown custom messages into user ones for the log). */
   let runFirst: AgentMessage | undefined;
-  let view: string | undefined, memories = '', lastStart: AgentMessage | undefined;
+  let view: string | undefined, orders = '', memories = '', lastStart: AgentMessage | undefined;
   let runLimit = defaults.runLimit, recall = defaults.memories, cut: AgentMessage | undefined;
   const seen = new Set<string>();
   /** The previous run's last message: everything after it opens the next run, even before that run's first message_end ran. */
@@ -71,7 +71,7 @@ export default function optchat(pi: ExtensionAPI) {
       release = await lockProfile(dir, `OMP PID ${process.pid} (${ctx.cwd})`);
       const config = loadConfig(dir);
       runLimit = config.runLimit; recall = config.memories;
-      memory = await Memory.open(dir, createCompressor(ctx.modelRegistry, () => config.compactor), text => ctx.ui.notify(text, 'warning'));
+      memory = await Memory.open(dir, createCompressor(ctx.modelRegistry, () => config.compactor), text => ctx.ui.notify(text, 'warning'), undefined, undefined, createOrderTask(ctx.modelRegistry, () => config.compactor));
       agents = new AgentIndex(dir, text => ctx.ui.notify(text, 'warning'), () => ctx.sessionManager.getSessionFile());
       const setting = lookup('compaction.enabled');
       if (!setting) throw new Error('OMP compaction.enabled setting unavailable.');
@@ -114,7 +114,7 @@ export default function optchat(pi: ExtensionAPI) {
         const show = () => ctx.ui.setWorkingMessage(`Waiting for OptChat summaries…${m.lastError ? ` ${m.lastError}` : ''}`);
         show(); const unsubscribe = m.onChange(show);
         try { await m.settle(controller.signal); } finally { unsubscribe(); ctx.ui.setWorkingMessage(); }
-        view = m.render(); flush();
+        view = m.render(); orders = m.orders?.render() ?? ''; flush();
       }
       // OMP emits message_end fire-and-forget, so the first request of a run can arrive before runFirst is set.
       if (running && !runFirst && lastEnd) {
@@ -138,11 +138,11 @@ export default function optchat(pi: ExtensionAPI) {
             const show = () => ctx.ui.setWorkingMessage(`Waiting for OptChat summaries…${m.lastError ? ` ${m.lastError}` : ''}`);
             show(); const unsubscribe = m.onChange(show);
             try { await m.settle(controller.signal); } finally { unsubscribe(); ctx.ui.setWorkingMessage(); }
-            view = m.render(); cut = event.messages[next]; from = next;
+            view = m.render(); orders = m.orders?.render() ?? ''; cut = event.messages[next]; from = next;
           }
         }
       }
-      return { messages: projectContext(event.messages, at, running ? view! : m.render(), memories, true, 'main', from) };
+      return { messages: projectContext(event.messages, at, running ? view! : m.render(), memories, true, 'main', from, running ? orders : m.orders?.render() ?? '') };
     } catch (error) {
       fail(error, ctx);
       return { messages: [{ role: 'developer' as const, content: 'OptChat context unavailable. Stop.', timestamp: 0 }] };

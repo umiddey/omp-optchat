@@ -7,10 +7,10 @@ import { COMPACT, OPTCHAT_PROMPT } from '../src/prompts.ts';
 import { loadConfig } from '../src/config.ts';
 import { Memory } from '../src/memory.ts';
 
-test('system prompts equal recipe §5 with only allowed name changes and device omission', () => {
+test('compactor equals recipe §5; turn adds only the deliberate standing-orders extension', () => {
   const recipe = readFileSync(new URL('./fixtures/recipe-prompt.txt', import.meta.url), 'utf8').trimEnd();
   assert.equal(COMPACT, recipe);
-  assert.equal(OPTCHAT_PROMPT, recipe);
+  assert.equal(OPTCHAT_PROMPT, recipe + `\n\n<orders> holds the user's standing orders in their own words. They stay in force until the user changes them and override any summary that says otherwise. Use zoom(id, 1) for context.`);
 });
 test('new profiles default to xhigh and existing explicit effort is unchanged', () => {
   const dir = mkdtempSync(join(tmpdir(), 'optchat-recipe-config-'));
