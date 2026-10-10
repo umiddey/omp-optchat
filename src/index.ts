@@ -22,7 +22,7 @@ export default function optchat(pi: ExtensionAPI) {
   /** The run's first message as OMP holds it (asUser turns shown custom messages into user ones for the log). */
   let runFirst: AgentMessage | undefined;
   let view: string | undefined, memories = '', lastStart: AgentMessage | undefined;
-  let runLimit = defaults.runLimit, cut: number | undefined;
+  let runLimit = defaults.runLimit, cut: AgentMessage | undefined;
   const seen = new Set<string>();
   /** The previous run's last message: everything after it opens the next run, even before that run's first message_end ran. */
   let lastEnd: AgentMessage | undefined;
@@ -123,9 +123,12 @@ export default function optchat(pi: ExtensionAPI) {
       }
       const first = running ? runFirst : lastStart;
       const at = turnStart(event.messages, first);
+      // OMP may insert or rewrite history between requests; anchor the cut like the run's first message.
+      const anchor = cut;
+      let from = anchor ? event.messages.findLastIndex(message => message.role === anchor.role && message.timestamp === anchor.timestamp) : -1;
+      if (from <= at) { from = at + 1; cut = undefined; }
       if (running) {
         lastStart = event.messages[at];
-        const from = cut ?? at + 1;
         if (rawBytes(event.messages, from) > runLimit) {
           const next = event.messages.findLastIndex(message => message.role === 'assistant');
           if (next > from) {
@@ -135,11 +138,11 @@ export default function optchat(pi: ExtensionAPI) {
             const show = () => ctx.ui.setWorkingMessage(`Waiting for OptChat summaries…${m.lastError ? ` ${m.lastError}` : ''}`);
             show(); const unsubscribe = m.onChange(show);
             try { await m.settle(controller.signal); } finally { unsubscribe(); ctx.ui.setWorkingMessage(); }
-            view = m.render(); cut = next;
+            view = m.render(); cut = event.messages[next]; from = next;
           }
         }
       }
-      return { messages: projectContext(event.messages, at, running ? view! : m.render(), memories, true, 'main', cut ?? at + 1) };
+      return { messages: projectContext(event.messages, at, running ? view! : m.render(), memories, true, 'main', from) };
     } catch (error) {
       fail(error, ctx);
       return { messages: [{ role: 'developer' as const, content: 'OptChat context unavailable. Stop.', timestamp: 0 }] };

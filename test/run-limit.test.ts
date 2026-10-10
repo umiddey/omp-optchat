@@ -102,3 +102,41 @@ test('an oversized last assistant batch does not cut again until a newer assista
     expect(JSON.stringify(c.messages[0])).toContain('latest');
   });
 });
+
+test('rollover cut follows its message when history inserts a message before it', async () => {
+  await harness(100, async (hooks, ctx) => {
+    await hooks.get('message_end')({ message: first }, ctx);
+    await hooks.get('context')({ messages: [first] }, ctx);
+    const old = assistant(2, 'old'), echo = result(3, 'x'.repeat(200)), latest = assistant(4, 'latest'), tail = result(5, 'small');
+    const a = await hooks.get('context')({ messages: [first, old, echo, latest, tail] }, ctx);
+    const inserted: AgentMessage = { role: 'custom', customType: 'async-result', display: true, content: 'insert', timestamp: 10 };
+    const b = await hooks.get('context')({ messages: [first, old, echo, inserted, latest, tail] }, ctx);
+    expect(b.messages).toEqual(a.messages);
+    expect(b.messages.slice(1)).toEqual([latest, tail]);
+  });
+});
+
+test('missing rollover cut falls back to the opening tail without faulting', async () => {
+  await harness(100, async (hooks, ctx) => {
+    await hooks.get('message_end')({ message: first }, ctx);
+    await hooks.get('context')({ messages: [first] }, ctx);
+    const old = assistant(2, 'old'), echo = result(3, 'x'.repeat(200)), latest = assistant(4, 'latest'), tail = result(5, 'small');
+    await hooks.get('context')({ messages: [first, old, echo, latest, tail] }, ctx);
+    const b = await hooks.get('context')({ messages: [first, old, echo, tail] }, ctx);
+    expect(b.messages.slice(1)).toEqual([old, echo, tail]);
+    const next = assistant(6, 'next');
+    const c = await hooks.get('context')({ messages: [first, old, echo, tail, next] }, ctx);
+    expect(c.messages.slice(1)).toEqual([next]);
+  });
+});
+
+test('missing cut can select a fresh latest assistant on the same request', async () => {
+  await harness(100, async (hooks, ctx) => {
+    await hooks.get('message_end')({ message: first }, ctx);
+    await hooks.get('context')({ messages: [first] }, ctx);
+    const old = assistant(2, 'old'), echo = result(3, 'x'.repeat(200)), removed = assistant(4, 'removed'), next = assistant(6, 'next');
+    await hooks.get('context')({ messages: [first, old, echo, removed] }, ctx);
+    const out = await hooks.get('context')({ messages: [first, old, echo, next] }, ctx);
+    expect(out.messages.slice(1)).toEqual([next]);
+  });
+});

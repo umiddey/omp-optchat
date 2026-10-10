@@ -76,6 +76,10 @@ messages before the cut without duplicate logging, wait with the same summaries 
 view + moved memories + the original first message content, and the latest assistant plus all following
 tool results/injections unchanged. An individual assistant/tool batch can exceed the bound until a newer
 assistant exists: never split tool-use/result pairs or discard the last assistant's thinking.
+Store the cut message, not its array index. Resolve its role + timestamp with `findLastIndex` on every
+context call, so inserted history cannot move the boundary. If rewritten history no longer contains the
+cut, fall back to the run opening's next message and run the normal limit check on that same request;
+missing cuts never fault the session and may immediately select a fresh latest-assistant boundary.
 
 Between cuts the view and cut are fixed: requests only extend the same prefix. Across cuts the view appends
 lines unless a 128 KB merge batch fires. Existing view marks therefore retain tools + system + old whole

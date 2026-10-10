@@ -269,3 +269,19 @@ The model claimed fourteen calls in its final prose, but actual session records 
 assistant toolCall blocks and ten toolResult messages; all ten numeric answers are correct.
 Temporary driver, temp directories/logs and both isolated live sessions are removed; HANDOFF-runlimit.md
 is intentionally untracked as requested. No install, push, merge, publish or other-worktree access.
+
+### Cut-anchor review correction
+
+Orchestrator requested replacing the numeric cut with a message anchor. The cut now stores the selected
+assistant message and resolves its role + timestamp via `findLastIndex` on every context call.
+If the cut is missing (or not after the opening), the same request falls back to `at + 1`, clears the
+obsolete anchor and runs normal limit selection without faulting. Insertion before a retained cut no
+longer includes the newly inserted message in its raw tail. DESIGN.md documents the history-rewrite rule.
+
+Red-first: `bun test test/run-limit.test.ts`, exit 1: 6 pass, 2 fail. Insert-before-cut test unexpectedly
+received the inserted custom message in the projected tail; missing-cut test received only the last
+result instead of the fallback old assistant/result/tail. Both now pass unchanged. A third test verifies
+that missing-cut fallback can choose a fresh latest assistant on that same context call.
+
+Verification: `bun test`, exit 0, 81 pass, 0 fail, 11 files, 35 expect assertions plus existing node assertions.
+`bunx tsc --noEmit`, exit 0. No live rerun requested for this anchor-only correction.
