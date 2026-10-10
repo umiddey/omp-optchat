@@ -66,12 +66,13 @@ function retired(item: OrderItem, events: readonly RetirementEvent[]) {
  return events.some(event => Math.max(...item.from) <= event.i && event.retire.some(target =>
   typeof target === 'number' ? item.from.includes(target) : mentions(item.text, target)));
 }
-const CONDITIONS: Record<string, true> = { every: true, each: true, all: true, never: true, always: true, only: true, until: true, unless: true, except: true, before: true, after: true, must: true, without: true, not: true, no: true };
+const NEGATIONS: Record<string, true> = { not: true, no: true, never: true, none: true, nobody: true, nothing: true, neither: true, nor: true, without: true, cannot: true };
+const CONDITIONS: Record<string, true> = { every: true, each: true, all: true, always: true, only: true, until: true, unless: true, except: true, before: true, after: true, must: true, ...NEGATIONS };
 /** Common words that are shouted in dictation (YOU HAVE TO), not acronyms. */
 const SHOUTED: Record<string, true> = { you: true, have: true, to: true, the: true, and: true, for: true, not: true, are: true, this: true, that: true, with: true, from: true, but: true, it: true, is: true, be: true, so: true, my: true, me: true, we: true, he: true, she: true, do: true, on: true, in: true, of: true, at: true, by: true, or: true, as: true, an: true, if: true, go: true, get: true, out: true, up: true, our: true, your: true, they: true, them: true, their: true, what: true, when: true, who: true, fucking: true, ever: true, point: true };
 /** Interjections and fillers that dictation capitalises mid-sentence; they are not names. */
 const DICTATION: Record<string, true> = { okay: true, ok: true, yeah: true, yes: true, yep: true, so: true, well: true, right: true, like: true, um: true, uh: true, hey: true, hi: true, sure: true, fine: true, cool: true, alright: true, thanks: true, please: true };
-/** Must-keep token of a source order: numbers, paths, URLs, ids and code-ish tokens match exactly; condition words and all-caps acronyms match whole words, case-insensitively; a capitalised word that does not start a sentence is a name (5+ letters tolerate edit distance 2). Plain lowercase words are never must-keep. */
+/** Hard tokens are numbers, paths, URLs, ids, conditions and acronyms. Ordinary non-initial capitals require contextual corroboration; CamelCase names do not. */
 interface Keep { text: string; match: 'exact' | 'word' | 'name' }
 function distance(a: string, b: string) {
  let row = Array.from({ length: b.length + 1 }, (_, j) => j);
@@ -82,48 +83,75 @@ function distance(a: string, b: string) {
  }
  return row[b.length];
 }
-function classify(token: string, start: boolean): Keep[] {
+function classify(token: string, start: boolean, contextNames: ReadonlySet<string>): Keep[] {
  if (!/[\p{L}\d]/u.test(token)) return [];
- if (token.includes('/') && !/[.:~]|^\//.test(token)) return token.split('/').flatMap((piece, index) => classify(piece, start && index === 0));
+ if (token.includes('/') && !/[.:~]|^\//.test(token)) return token.split('/').flatMap((piece, index) => classify(piece, start && index === 0, contextNames));
  if (/[._:\/\-\d]/.test(token)) return [{ text: token, match: 'exact' }];
  const found: Keep[] = [];
  for (const run of token.match(/\p{L}+/gu) ?? []) {
-  const acronym = run.length >= 2 && run === run.toUpperCase() && /\p{Lu}/u.test(run) && SHOUTED[run.toLowerCase()] !== true;
+  const acronym = /^\p{Lu}{2,}s?$/u.test(run) && SHOUTED[run.toLowerCase()] !== true;
   if (CONDITIONS[run.toLowerCase()] === true || acronym) found.push({ text: run, match: 'word' });
-  else if (!start && run.length >= 2 && /\p{Lu}/u.test(run) && DICTATION[run.toLowerCase()] !== true && SHOUTED[run.toLowerCase()] !== true) found.push({ text: run, match: run.length >= 5 ? 'name' : 'word' });
+  else if (run.length >= 2 && (/\p{Ll}\p{Lu}/u.test(run) || (!start && /\p{Lu}/u.test(run) && contextNames.has(run)))
+   && DICTATION[run.toLowerCase()] !== true && SHOUTED[run.toLowerCase()] !== true) found.push({ text: run, match: run.length >= 5 ? 'name' : 'word' });
  }
  return found;
 }
-function keeps(source: string): Keep[] {
- const raws = source.split(/\s+/);
- return raws.flatMap((raw, index): Keep[] => {
+const capitalCounts = (text: string) => {
+ const counts = new Map<string, number>();
+ for (const word of text.match(/\p{Lu}\p{L}*/gu) ?? []) counts.set(word, (counts.get(word) ?? 0) + 1);
+ return counts;
+};
+const squash = (text: string) => text.replace(/\s+/g, ' ').trim();
+/** Capitalized words the context uses outside the source itself: a scan's view also holds the source message, which must not
+ * corroborate its own words. */
+function corroborated(source: string, context: string): Set<string> {
+ const inContext = capitalCounts(context), inSource = capitalCounts(source);
+ const holdsSource = source.trim().length > 0 && squash(context).includes(squash(source));
+ return new Set([...inContext].filter(([word, count]) => count - (holdsSource ? inSource.get(word) ?? 0 : 0) > 0).map(([word]) => word));
+}
+/** Whether each whitespace-separated token of `text` starts a sentence (or a parenthesis, quote or line). */
+function tokens(text: string) {
+ const matches = [...text.matchAll(/\S+/g)];
+ const raws = matches.map(match => match[0]);
+ return raws.map((raw, index) => ({ raw, index, raws, start: index === 0 || /^[("'“‘]/.test(raw) || /[.!?:]["')\]]*$/.test(raws[index - 1])
+  || text.slice(matches[index - 1].index + raws[index - 1].length, matches[index].index).includes('\n') }));
+}
+function keeps(source: string, context: string): Keep[] {
+ const contextNames = corroborated(source, context);
+ return tokens(source).flatMap(({ raw, index, raws, start }): Keep[] => {
   const token = raw.replace(/^[`"'(\[{*]+|[`"')\]}.,;:!?*]+$/g, '');
   if (/n['’]t$/i.test(token)) return [{ text: 'not', match: 'word' }];
   // "and all that" is trailing dictation filler, not a quantified obligation.
   if (token.toLowerCase() === 'all' && /^that\b/i.test(raws[index + 1] ?? '') && /^and$/i.test(raws[index - 1] ?? '')) return [];
-  const start = index === 0 || /[.!?]["')\]]*$/.test(raws[index - 1]);
-  return raw.includes('`') && /[\p{L}\d]/u.test(token) ? [{ text: token, match: 'exact' }] : classify(token, start);
+  return raw.includes('`') && /[\p{L}\d]/u.test(token) ? [{ text: token, match: 'exact' }] : classify(token, start, contextNames);
  });
 }
 function holds(keep: Keep, restated: string, words: readonly string[]) {
  if (keep.match === 'exact') return new RegExp(`(?<![\\p{L}\\d])${keep.text.replace(/[.*+?^${}()|[\]\\\/]/g, '\\$&')}(?![\\p{L}\\d])`, 'u').test(restated);
  const word = keep.text.toLowerCase();
- if (keep.match === 'word' && word === 'not')
-  return words.some(word => word === 'not' || word === 'never' || word === 'no') || /\b\p{L}+n['’]t\b/u.test(restated);
- if (keep.match === 'word' && word === 'no')
-  return words.some(word => word === 'no' || word === 'zero' || word === 'none' || word === 'without') || /\b0\b/.test(restated);
- return keep.match === 'word' ? words.includes(word) || (keep.text === keep.text.toUpperCase() && words.includes(word + 's'))
+ if (keep.match === 'word' && NEGATIONS[word])
+  return words.some(word => NEGATIONS[word] || word === 'zero') || /\b\p{L}+n['’]t\b/u.test(restated) || /\b0\b/.test(restated);
+ const acronym = /^\p{Lu}{2,}s?$/u.test(keep.text);
+ const singular = acronym ? word.replace(/s$/, '') : word;
+ return keep.match === 'word' ? words.includes(word) || (acronym && words.some(candidate => candidate === singular || candidate === singular + 's'))
   : words.some(v => v === word || distance(v, word) <= 2);
 }
-/** Must-keep tokens of `source` that `restated` no longer carries; the guard and the retry note both use it. A capitalised word
- * the restatement shares with the context (and not with the source) resolves one missing name: the summarizer heard it in context. */
+/** Capitalized non-initial words the restatement brings in that neither the source nor the context has: an invented name
+ * (OIA → OI, Rappov → a guessed product) fails like a lost one. */
+function invented(source: string, restated: string, context: string): string[] {
+ const sourceWords = (source.match(/\p{L}+/gu) ?? []).map(word => word.toLowerCase());
+ const known = new Set([...sourceWords, ...(context.match(/\p{L}+/gu) ?? []).map(word => word.toLowerCase())]);
+ // A near spelling of a source word is a correction (gatefoge → Gateforge), not a new name.
+ const corrects = (word: string) => word.length >= 5 && sourceWords.some(source => source.length >= 5 && distance(source, word) <= 2);
+ return tokens(restated).flatMap(({ raw, start }) => start ? [] : (raw.match(/\p{L}+/gu) ?? []).filter(run => /\p{Lu}/u.test(run)
+  && run.length >= 2 && ![run, run.replace(/s$/, ''), `${run}s`].some(form => known.has(form.toLowerCase())) && !corrects(run.toLowerCase())
+  && DICTATION[run.toLowerCase()] !== true && SHOUTED[run.toLowerCase()] !== true && CONDITIONS[run.toLowerCase()] !== true))
+  .map(run => `invented ${run}`);
+}
+/** Missing hard tokens (ordinary capitalized names only when the context corroborates them) plus invented names. */
 export function missingTokens(source: string, restated: string, context = ''): string[] {
  const words = restated.toLowerCase().match(/\p{L}+/gu) ?? [];
- const unmet = [...new Map(keeps(source).filter(keep => !holds(keep, restated, words)).map((keep): [string, Keep] => [keep.text, keep])).values()];
- const sourceNames = new Set(source.match(/\p{Lu}\p{L}*/gu) ?? []);
- const contextNames = new Set(context.match(/\p{Lu}\p{L}*/gu) ?? []);
- const spare = (restated.match(/\p{Lu}\p{L}*/gu) ?? []).filter(word => !sourceNames.has(word) && contextNames.has(word));
- return unmet.filter(keep => { if (keep.match !== 'name' || spare.length === 0) return true; spare.shift(); return false; }).map(keep => keep.text);
+ return [...new Set([...keeps(source, context).filter(keep => !holds(keep, restated, words)).map(keep => keep.text), ...invented(source, restated, context)])];
 }
 const wording = (order: StandingOrder) => [order.text, order.until].filter(Boolean).join(' ');
 interface Gap { source: OrderItem; omitted: boolean; missing: string[] }
@@ -307,7 +335,8 @@ export class Orders {
    for (const item of batch) {
     const owners = groups.flatMap(group => group.indexes.flatMap(index => index === item.index ? [group] : []));
     const candidate = owners.length === 1 ? owners[0] : undefined;
-    const context = item.sources.flatMap(source => [source.said, source.before, source.after]).filter(Boolean).join('\n');
+    const context = [...item.sources.flatMap(source => [source.before, source.after]),
+     ...original.items.flatMap((other, index) => index === item.index ? [] : [wording(other)])].filter(Boolean).join('\n');
     const reason = !candidate ? `index appears ${owners.length} times`
      : item.kind !== candidate.order.kind ? 'kind changed'
      : item.until && !candidate.order.until ? 'done-condition omitted'
@@ -342,12 +371,13 @@ export class Orders {
     && this.records.get(id)?.orders.some(order => !('retire' in order))
     && (records.some(record => record.i === id) || candidate.covers.some(index => ledger.items[index]?.from.includes(id))))
     && old.from.some(id => candidate.text.includes(`(replaces msg ${id})`));
+   const context = ledger.items.filter((_, other) => other !== index).map(wording).join('\n');
    const reason = !candidate ? `index appears ${owners.length} times`
     : replacement ? ''
     : old.kind !== candidate.kind ? 'kind changed'
     : old.until && !candidate.until ? 'done-condition omitted'
-    : [...missingTokens(old.text, candidate.text),
-      ...(old.until ? missingTokens(old.until, candidate.until!) : [])].join(', ');
+    : [...missingTokens(old.text, candidate.text, context),
+      ...(old.until ? missingTokens(old.until, candidate.until!, context) : [])].join(', ');
    if (reason) {
     fallbacks.push(ledgerItem(old));
     this.warn(`Orders consolidation item ${index}: kept verbatim (${reason}): ${old.text}`);
@@ -398,9 +428,8 @@ export class Orders {
  scan(from: number, to: number) {
   return [...this.unscanned.keys()].filter(i => i >= from && i <= to).sort((a, b) => a - b);
  }
-/** Records what a summarizer call or the backfill read for each message, before the node that call built is written. A
- * restatement that loses a must-keep token of the user's words falls back to those words; the context (the call's view) lets a
- * name the summarizer heard there count as kept. */
+/** Records each scanned user message before its summary node is written. Hard-token loss falls back to the user's words;
+ * the compaction view corroborates ordinary capitalized names. */
 recordAll(scanned: ReadonlyMap<number, readonly OrderDirective[]>, context = '') {
   for (const [i, orders] of scanned) {
    const date = this.unscanned.get(i);

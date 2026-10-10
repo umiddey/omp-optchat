@@ -20,10 +20,15 @@ test('condition words are exact: every is not satisfied by each', () => {
  expect(missingTokens('Every endpoint', 'Each endpoint')).toEqual(['Every']);
 });
 
-test('a capitalised name mid-sentence must survive restating, and tolerates a typo of edit distance 2', () => {
- expect(missingTokens('Ask PM Gateforge to merge.', 'Ask PM to merge.')).toEqual(['Gateforge']);
- expect(missingTokens('Ask PM Gateforge to merge.', 'Ask the PM to merge.')).toEqual(['Gateforge']);
+test('a mid-sentence capital is a must-keep name when the context also uses it; a near spelling counts as kept', () => {
+ expect(missingTokens('Ask PM Gateforge to merge.', 'Ask PM to merge.', 'The Gateforge release is ready')).toEqual(['Gateforge']);
+ expect(missingTokens('Ask PM Gateforge to merge.', 'Ask PM to merge.')).toEqual([]);
  expect(missingTokens('Push to Gatefoge now.', 'Push to Gateforge now.')).toEqual([]);
+});
+
+test('a name the restatement brings in from nowhere is reported as invented', () => {
+ expect(missingTokens('Ask the OIA agent.', 'Ask the OI agent.')).toEqual(['OIA', 'invented OI']);
+ expect(missingTokens('Send it to Rappov', 'Send it to Gateforge', 'user: Send it to Rappov\nassistant: The Gateforge repo is ready')).toEqual([]);
 });
 
 test('an all-caps acronym of two or more letters is must-keep, case-insensitively', () => {
