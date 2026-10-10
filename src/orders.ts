@@ -94,11 +94,11 @@ function failing(next: readonly OrderItem[], needed: readonly OrderItem[]): Gap[
 function retryNote(gaps: readonly Gap[]) {
  return `These orders lost wording while being restated. Restate each one again, keeping every listed word, number, path and id; typos and names may be fixed.\n${gaps.map(gap => `msg ${gap.source.from.join(', ')} "${wording(gap.source)}": ${gap.omitted ? 'no item covers it' : `missing ${gap.missing.map(t => JSON.stringify(t)).join(', ')}`}`).join('\n')}`;
 }
-/** Per failing order its verbatim text replaces it, and its ids leave every model item that carried them. */
-function substitute(next: readonly OrderItem[], gaps: readonly Gap[]): OrderItem[] {
+/** Per failing order its ids leave every model item that carried them; every needed order left uncovered by that falls back to its verbatim text. */
+function substitute(next: readonly OrderItem[], needed: readonly OrderItem[], gaps: readonly Gap[]): OrderItem[] {
  const ids = new Set(gaps.flatMap(gap => gap.source.from));
  const remaining = next.map(item => ({ ...item, from: item.from.filter(id => !ids.has(id)) })).filter(item => item.from.length);
- return [...remaining, ...gaps.map(gap => ({ ...gap.source }))];
+ return [...remaining, ...needed.filter(source => failing(remaining, [source]).length).map(source => ({ ...source }))];
 }
 function items(value: unknown): OrderItem[] {
  if (!Array.isArray(value)) throw Error('Ledger must be an array.');
@@ -249,7 +249,7 @@ export class Orders {
     const omitted = gaps.find(gap => gap.omitted && kept.includes(gap.source));
     if (omitted) throw Error(`Only user words can retire or replace an order; model omitted active order: ${omitted.source.text}`);
     if (gaps.length && attempt < 2) { retry = retryNote(gaps); continue; }
-    const final = gaps.length ? substitute(next, gaps) : next;
+    const final = gaps.length ? substitute(next, needed, gaps) : next;
     if (failing(final, needed).length) throw Error('Verbatim fallback did not restore coverage.');
     if (gaps.length) this.warn(`Orders consolidation: kept the verbatim wording of ${gaps.length} order(s) that lost conditions after retries (msg ${gaps.map(gap => gap.source.from.join(', ')).join('; ')}).`);
     const dates = new Map<number, string>();

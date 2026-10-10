@@ -482,3 +482,16 @@ test('E turn prompt says orders are restated and zoom(id, 1) shows the exact wor
  expect(OPTCHAT_PROMPT).toContain("zoom(id, 1) shows the user's exact words");
  expect(OPTCHAT_PROMPT).toContain('check the original with zoom(id, 1) before acting');
 });
+test('F a verbatim fallback keeps coverage of a passing order that shares a message with a failing one', async () => {
+ const warnings: string[] = [];
+ await fixture(async o => {
+  o.append(entry(0, 'Never push to main. Always verify claims.')); await o.batch(0);
+  expect(o.ledger.through).toBe(0);
+  expect(o.render()).toContain('Never push to main.');
+  expect(o.render()).toContain('Always verify claims.');
+  expect(warnings).toHaveLength(1);
+ }, async task => {
+  if (task.kind === 'extract') return [{ text: 'Never push to main.', kind: 'rule' }, { text: 'Always verify claims.', kind: 'rule' }];
+  return [{ text: 'Always verify claims.', kind: 'rule', from: [0], date: '2026-10-10' }];
+ }, [], text => warnings.push(text));
+});
