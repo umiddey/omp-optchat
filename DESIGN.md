@@ -31,8 +31,8 @@ their results are logged like any tool result.
 - One process per profile (recipe §1 "one process owns a chat"): lock with PID + liveness check (port
   pi-optchat `profiles.ts` lock logic, simplified). A second OMP on a held profile: TUI → notify error and
   refuse input (`input` handler returns handled); print/rpc → throw. No silent fallback to plain OMP.
-- `config.json`: `{ "compactor": { "provider": "anthropic", "model": "claude-haiku-5-5", "thinking": "medium" } }`
-  defaults; editable by hand.
+- `config.json`: `{ "compactor": { "provider": "anthropic", "model": "claude-haiku-5-5", "thinking": "medium" }, "runLimit": 256000 }`
+  defaults; editable by hand. Missing `runLimit` uses 256000; invalid/nonpositive/noninteger values fail clearly.
 
 ## Turn integration (OMP hooks)
 
@@ -41,7 +41,7 @@ their results are logged like any tool result.
 | `session_start` | open memory + lock; activate tools `zoom`,`date`; runtime-override OMP auto-compaction off (setting `compaction.enabled`, `pi-coding-agent/src/session/context-settings.ts`; `lookup(id).override(pi.pi.settings,false)`, never persisted); status line. |
 | `session_before_compact` | `{ cancel: true }` (backstop). |
 | `before_agent_start` | Return `systemPrompt` = `event.systemPrompt` with (a) every element starting with `<memories>` removed and stashed for this run, (b) the OptChat static prompt inserted as its own element immediately before the first element starting with `<project-context>` (or appended if none). Static = byte-identical every call: no dates, ids, counts. |
-| `message_end` | Buffer the message in `run` (pi-optchat `index.ts` 326-362 pattern). Messages are logged to memory only after the run's view is frozen, so the view never contains the current run. |
+| `message_end` | Buffer the message in `run` (pi-optchat `index.ts` 326-362 pattern). Messages are logged after the initial view is frozen; mid-run rollover may incorporate them into the next frozen view. |
 | `context` | See below. |
 | `before_provider_request` | Anthropic payloads only (`ctx.model?.api === "anthropic-messages"`): cache marks (below). Other APIs: return payload unchanged. |
 | `agent_start` / `agent_end` | run boundaries (view = undefined at start; flush log at end). |
@@ -62,6 +62,26 @@ their results are logged like any tool result.
    `memory.render()` (no settle wait) + messages after the last run's turn start.
 6. Any failure: `ctx.abort()` and return a single system message "OptChat context unavailable. Stop." —
    never fall back to the full OMP history (pi-optchat 385-391).
+
+### Long-run rollover: deliberate recipe deviation
+
+The recipe assumes short turns and has no mid-run rule. OMP orchestration can remain in one run for hours,
+so disabling native compaction requires an additional raw-tail bound. During `context`, count UTF-8 bytes
+of content after the opening message (or from the last cut): text, thinking, tool names + JSON arguments,
+tool results, custom content, and other content blocks. Transport/usage metadata is not counted.
+When this exceeds `runLimit`, select the latest assistant in `event.messages`, not the possibly incomplete
+fire-and-forget `message_end` buffer. Advance only if it is after the current cut. Catch up and flush
+messages before the cut without duplicate logging, wait with the same summaries working message and
+`settle(signal)` as run start, then render a new view. Send notices, one user opening containing the new
+view + moved memories + the original first message content, and the latest assistant plus all following
+tool results/injections unchanged. An individual assistant/tool batch can exceed the bound until a newer
+assistant exists: never split tool-use/result pairs or discard the last assistant's thinking.
+
+Between cuts the view and cut are fixed: requests only extend the same prefix. Across cuts the view appends
+lines unless a 128 KB merge batch fires. Existing view marks therefore retain tools + system + old whole
+view blocks in the shared cache prefix; the new tail is written. A merge has the same accepted cache cost
+as at turn start. No cache-mark changes are required. I1 applies between cuts; I2/I3 apply across cuts as
+well as across runs. Main-agent and opt-in guards remain unchanged.
 
 Logging (recipe §1, pi-optchat `transcript.ts` `logMessage`/`boundedMessage`): user → `user`; assistant text →
 reply kind; tool calls → `tool` (`name JSON`); tool results → `echo`, head+tail capped to 30,000 chars; displayed

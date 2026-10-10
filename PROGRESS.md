@@ -192,3 +192,80 @@ No live runs, merge, installation, push or temporary files in this review unit. 
 | Opus main, two background subagents (glm, luna), results start runs | before fix: first request of a result-started run re-sent the previous turn (live owner session: 45k tokens rewritten). OMP emits `message_end` fire-and-forget, so `context` ran before `runFirst` was set. Fix: the run opens after the previous run's last message (`lastEnd`). Red/green: `test/run-start.test.ts`. After fix: request opens `[view][async-result]`, main ≥96% on every call after the first | PASS |
 | `zoom("GlmCount")` from the main agent | returned the subagent transcript; model named its first bash command | PASS |
 | Restart with `--resume` across a plugin upgrade | first request full miss: static prompt and zoom tool text changed with the upgrade (expected once per upgrade) | expected |
+
+## Long-run rollover — run-limit-sol (2026-10-10)
+
+Implemented `config.json` `runLimit` (positive safe integer UTF-8 bytes, default 256000 for old profiles),
+deterministic raw content counting, latest-assistant cuts, pre-cut logging catch-up, summary settle/render,
+and preservation of the original task, latest assistant/thinking, tool results and later injections.
+Views/cuts stay fixed between rollovers. Existing logging conventions, run anchors and cache marks remain.
+The fire-and-forget catch-up claims messages before image I/O and deduplicates later message_end delivery.
+README and DESIGN explain configuration, deliberate recipe deviation and cache-prefix argument.
+
+Red-first command: `bun test test/run-limit.test.ts`, exit 1: 1 pass, 3 fail.
+Rollover test retained earlier assistant/result messages instead of the latest assistant tail;
+between-cut test received 4 messages instead of 2; config test found no runLimit property.
+The unchanged-under-limit test passed on the baseline. The rollover test also asserts byte-identical
+latest assistant, intact result/injection tail, old content in the view, original task retained,
+and duplicate-delivery stability. Added UTF-8/thinking/tool-argument/custom counting and no-advance tests.
+
+| Acceptance | Evidence | Result |
+|---|---|---|
+| Full tests | `bun test`: exit 0, 78 pass, 0 fail, 11 files, 27 expect assertions (plus existing node:assert assertions) | PASS |
+| Types | `bunx tsc --noEmit`: exit 0 | PASS |
+| Rollover / intact tail / task | red-first test failed on retained old messages; final suite checks exact tail and assistant JSON equality | PASS |
+| Fixed between-cut prefix | red-first expected 2, received 4; final suite checks same opening and append-only tail | PASS |
+| Under limit unchanged | identical `projectContext` output on baseline and final suite | PASS |
+| Config | red-first missing property; final suite checks old/default, explicit 6000 and six invalid values | PASS |
+| Single live copy | first provider dump has exactly one `_zoom` tool and one `You are OptChat` system block | PASS |
+| Live rollover | 11 provider requests, 10 sequential bash calls; cuts at requests 4, 6, 8, 10 | PASS |
+| Final answer | memory.ts 20,824 bytes, largest; all ten counts match independent `wc -c` exit 0 | PASS |
+| Cached shared prefixes | tools/system byte-identical at every cut; shared marked old-view blocks at cuts 6/8/10: 2/3/5 | PASS |
+| Live cache shares | minimum at cut 4: 88.09%; report after first call 91.3%, zero misses <80% | PASS |
+
+Live launch: detached `setsid nohup bun /home/ukd/projects/omp-optchat-runlimit-sol/live-runlimit-sol.ts`
+(launch exit 0). Driver used temp cwd `/tmp/runlimit-sol/cwd`, fresh profile `/tmp/runlimit-sol/home/proof`,
+`runLimit:6000`, and dumps `/tmp/runlimit-sol/dumps`; ran
+`omp --mode rpc --no-ui --no-title --no-extensions -e /home/ukd/projects/omp-optchat-runlimit-sol/src/index.ts --optchat proof`
+with OMPCODE/OMP_OPTCHAT cleared and default anthropic/claude-opus-5-5.
+One prompt requested ten sequential wc calls with 25 short diagnostic padding lines per call to trigger
+rollover without long-line truncation. prompt_result: completed, agentInvoked=true, sessionSettled=true.
+Initial experiment used one long padding line, which bash truncated to 768 bytes and produced only one cut;
+the revised experiment changes diagnostic shape, not implementation or assertions.
+
+Session measured (removed during requested cleanup):
+`/home/ukd/.omp/agent/sessions/-tmp-runlimit-sol-cwd/2026-10-10T07-25-13-574Z_01a124b3-9de6-7698-aae7-9dcf9ae674b9.jsonl`.
+
+| Request | Payload messages | View bytes | Input | cacheRead | cacheWrite | Read share | Event |
+|---:|---:|---:|---:|---:|---:|---:|---|
+| 1 | 1 | 15 | 4 | 32360 | 658 | 97.995% | tools/system already warm |
+| 2 | 3 | 15 | 2 | 33018 | 2776 | 92.239% | append |
+| 3 | 5 | 15 | 2 | 35794 | 2707 | 92.964% | append |
+| 4 | 3 | 2259 | 2 | 32360 | 4373 | 88.090% | cut, empty old view had no whole marked blocks |
+| 5 | 5 | 2259 | 2 | 36733 | 2906 | 92.664% | append |
+| 6 | 3 | 3581 | 2 | 33201 | 4128 | 88.937% | cut, 2 marked old-view blocks shared |
+| 7 | 5 | 3581 | 2 | 37329 | 2835 | 92.937% | append |
+| 8 | 3 | 4745 | 2 | 33712 | 4150 | 89.034% | cut, 3 marked old-view blocks shared |
+| 9 | 5 | 4745 | 2 | 37862 | 2794 | 93.123% | append |
+| 10 | 3 | 6156 | 2 | 34478 | 4040 | 89.507% | cut, 5 marked old-view blocks shared |
+| 11 | 5 | 6156 | 2 | 38518 | 2808 | 93.201% | final answer |
+
+Before each cut request roles are `[user, assistant, user(tool_result), assistant, user(tool_result)]`;
+after each cut they are `[user(new view + original task), latest assistant, user(tool_result)]`.
+No merge batch occurred. The first empty view cannot share any whole view block; fallback system cache
+still reads tools/system. Later cuts share old whole-view marks and read those tokens as usage confirms.
+
+Required cache report command (exit 0):
+`bun /home/ukd/projects/omp-optchat/scripts/cache-report.ts <session above>`
+
+```text
+✓ main                         anthropic/claude-opus-5-5
+    11 calls · overall 91.8% from cache · after the first call 91.3% · misses below 80.0%: 0 (unexplained 0)
+```
+
+Final verified wc counts: index.ts 7589; integration.ts 2475; config.ts 2082; memory.ts 20824;
+transcript.ts 4537; cache.ts 3637; agents.ts 10463; tools.ts 2419; store.ts 7088; compactor.ts 5545.
+The model claimed fourteen calls in its final prose, but actual session records contain exactly ten
+assistant toolCall blocks and ten toolResult messages; all ten numeric answers are correct.
+Temporary driver, temp directories/logs and both isolated live sessions are removed; HANDOFF-runlimit.md
+is intentionally untracked as requested. No install, push, merge, publish or other-worktree access.

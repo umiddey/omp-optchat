@@ -68,8 +68,10 @@ Summarizer model (default `anthropic/claude-haiku-5-5`, medium effort): edit
 `~/.omp/optchat/<profile>/config.json`:
 
 ```json
-{ "compactor": { "provider": "anthropic", "model": "claude-haiku-5-5", "thinking": "medium" } }
+{ "compactor": { "provider": "anthropic", "model": "claude-haiku-5-5", "thinking": "medium" }, "runLimit": 256000 }
 ```
+
+`runLimit` is a positive integer UTF-8 byte limit for the raw run tail (default 256000, about 64k tokens); long runs refresh their memory view at the latest assistant boundary while retaining the original task and intact assistant/tool-result tail.
 
 ## What it changes in OMP (only when the flag is set)
 

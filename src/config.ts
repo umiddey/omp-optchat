@@ -5,7 +5,7 @@ import { Effort } from '@oh-my-pi/pi-ai';
 import type { ModelChoice } from './compactor.ts';
 import { atomicWrite } from './store.ts';
 import { record } from './cache.ts';
-export const defaults: { compactor: ModelChoice } = { compactor: { provider: 'anthropic', model: 'claude-haiku-5-5', thinking: Effort.Medium } };
+export const defaults: { compactor: ModelChoice; runLimit: number } = { compactor: { provider: 'anthropic', model: 'claude-haiku-5-5', thinking: Effort.Medium }, runLimit: 256000 };
 const home = () => resolve(process.env.OMP_OPTCHAT_HOME ?? join(homedir(), '.omp', 'optchat'));
 export function profilePath(name: string) {
   if (!/^[a-z0-9][a-z0-9_-]{0,63}$/.test(name)) throw new Error('Profile names: 1–64 lowercase letters, digits, hyphens, or underscores.');
@@ -19,7 +19,7 @@ export function firstRun() {
   atomicWrite(marker, new Date().toISOString() + '\n');
   return true;
 }
-export function loadConfig(dir: string): { compactor: ModelChoice } {
+export function loadConfig(dir: string): typeof defaults {
   mkdirSync(dir, { recursive: true, mode: 0o700 });
   const file = join(dir, 'config.json');
   if (!existsSync(file)) atomicWrite(file, JSON.stringify(defaults, null, 2) + '\n');
@@ -27,6 +27,9 @@ export function loadConfig(dir: string): { compactor: ModelChoice } {
   const choice = record(value) ? value.compactor : undefined;
   if (!record(choice) || typeof choice.provider !== 'string' || typeof choice.model !== 'string'
     || !['off', 'minimal', 'low', 'medium', 'high', 'xhigh', 'max'].includes(String(choice.thinking))) throw new Error(`Invalid compactor configuration: ${file}`);
+  const runLimit = record(value) && value.runLimit !== undefined ? value.runLimit : defaults.runLimit;
+  if (typeof runLimit !== 'number' || !Number.isSafeInteger(runLimit) || runLimit <= 0)
+    throw new Error(`Invalid runLimit configuration (expected positive integer UTF-8 bytes): ${file}`);
   // The enum was validated against OMP's supported effort strings above.
-  return { compactor: { provider: choice.provider, model: choice.model, thinking: choice.thinking as ModelChoice['thinking'] } };
+  return { compactor: { provider: choice.provider, model: choice.model, thinking: choice.thinking as ModelChoice['thinking'] }, runLimit };
 }

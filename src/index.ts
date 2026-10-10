@@ -5,11 +5,11 @@ import { lookup } from '@oh-my-pi/pi-coding-agent/config/registry';
 import type { AgentMessage } from '@oh-my-pi/pi-agent-core';
 import { Memory } from './memory.ts';
 import { createCompressor } from './compactor.ts';
-import { profilePath, loadConfig, firstRun, WELCOME } from './config.ts';
+import { defaults, profilePath, loadConfig, firstRun, WELCOME } from './config.ts';
 import { lockProfile } from './profiles.ts';
 import { asUser, boundedMessage, logMessage } from './transcript.ts';
 import { saveImages } from './images.ts';
-import { preparePrompt, projectContext, providerPayload, turnStart } from './integration.ts';
+import { preparePrompt, projectContext, providerPayload, rawBytes, turnStart } from './integration.ts';
 import { registerMemoryTools } from './tools.ts';
 import { AgentIndex } from './agents.ts';
 
@@ -22,6 +22,8 @@ export default function optchat(pi: ExtensionAPI) {
   /** The run's first message as OMP holds it (asUser turns shown custom messages into user ones for the log). */
   let runFirst: AgentMessage | undefined;
   let view: string | undefined, memories = '', lastStart: AgentMessage | undefined;
+  let runLimit = defaults.runLimit, cut: number | undefined;
+  const seen = new Set<string>();
   /** The previous run's last message: everything after it opens the next run, even before that run's first message_end ran. */
   let lastEnd: AgentMessage | undefined;
   let controller = new AbortController(), sequence = 0;
@@ -34,6 +36,18 @@ export default function optchat(pi: ExtensionAPI) {
     return memory;
   };
   const flush = () => { const m = required(); while (logged < run.length) { logMessage(m, run[logged]); logged++; } };
+  // context can precede fire-and-forget message_end. Claim before awaiting image I/O so catch-up cannot log twice.
+  const recordMessage = async (original: AgentMessage, ctx: ExtensionContext) => {
+    const key = `${original.role}:${original.timestamp}:${original.role === 'toolResult' ? original.toolCallId : original.role === 'custom' ? original.customType : ''}`;
+    if (seen.has(key)) return;
+    seen.add(key);
+    const message = boundedMessage(original), shown = asUser(message);
+    agents!.recordMessage(original, ctx.sessionManager.getSessionFile());
+    runFirst ??= original;
+    run.push(message);
+    if (shown.role === 'user' || (shown.role === 'toolResult' && shown.toolName !== 'zoom')) await saveImages(required().store, shown.content);
+    if (view !== undefined) flush();
+  };
   const fail = (error: unknown, ctx: ExtensionContext) => {
     fault = error instanceof Error ? error.message : String(error);
     controller.abort(); ctx.abort(); ctx.ui.notify(fault, 'error');
@@ -56,6 +70,7 @@ export default function optchat(pi: ExtensionAPI) {
       mkdirSync(dir, { recursive: true, mode: 0o700 });
       release = await lockProfile(dir, `OMP PID ${process.pid} (${ctx.cwd})`);
       const config = loadConfig(dir);
+      runLimit = config.runLimit;
       memory = await Memory.open(dir, createCompressor(ctx.modelRegistry, () => config.compactor), text => ctx.ui.notify(text, 'warning'));
       agents = new AgentIndex(dir, text => ctx.ui.notify(text, 'warning'), () => ctx.sessionManager.getSessionFile());
       const setting = lookup('compaction.enabled');
@@ -83,17 +98,12 @@ export default function optchat(pi: ExtensionAPI) {
   pi.on('agent_start', (_event, ctx) => {
     if (!active(ctx)) return;
     controller.abort(); controller = new AbortController();
-    run = []; runFirst = undefined; logged = 0; view = undefined; running = true;
+    run = []; runFirst = undefined; logged = 0; view = undefined; cut = undefined; seen.clear(); running = true;
   });
   pi.on('message_end', async (event, ctx) => {
     if (!active(ctx) || !running) return;
     try {
-      const message = boundedMessage(event.message), shown = asUser(message);
-      agents!.recordMessage(event.message, ctx.sessionManager.getSessionFile());
-      if (shown.role === 'user' || (shown.role === 'toolResult' && shown.toolName !== 'zoom')) await saveImages(required().store, shown.content);
-      runFirst ??= event.message;
-      run.push(message);
-      if (view !== undefined) flush();
+      await recordMessage(event.message, ctx);
     } catch (error) { fail(error, ctx); }
   });
   pi.on('context', async (event, ctx) => {
@@ -113,8 +123,23 @@ export default function optchat(pi: ExtensionAPI) {
       }
       const first = running ? runFirst : lastStart;
       const at = turnStart(event.messages, first);
-      if (running) lastStart = event.messages[at];
-      return { messages: projectContext(event.messages, at, running ? view! : m.render(), memories) };
+      if (running) {
+        lastStart = event.messages[at];
+        const from = cut ?? at + 1;
+        if (rawBytes(event.messages, from) > runLimit) {
+          const next = event.messages.findLastIndex(message => message.role === 'assistant');
+          if (next > from) {
+            // Flush even messages whose message_end has not run yet, before waiting for their summaries.
+            for (const message of event.messages.slice(at, next)) await recordMessage(message, ctx);
+            flush();
+            const show = () => ctx.ui.setWorkingMessage(`Waiting for OptChat summaries…${m.lastError ? ` ${m.lastError}` : ''}`);
+            show(); const unsubscribe = m.onChange(show);
+            try { await m.settle(controller.signal); } finally { unsubscribe(); ctx.ui.setWorkingMessage(); }
+            view = m.render(); cut = next;
+          }
+        }
+      }
+      return { messages: projectContext(event.messages, at, running ? view! : m.render(), memories, true, 'main', cut ?? at + 1) };
     } catch (error) {
       fail(error, ctx);
       return { messages: [{ role: 'developer' as const, content: 'OptChat context unavailable. Stop.', timestamp: 0 }] };
