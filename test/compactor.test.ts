@@ -8,7 +8,7 @@ import { NODE } from '../src/memory.ts';
 let streaming: typeof ai.streamSimple;
 mock.module('@oh-my-pi/pi-ai', () => ({ ...ai, streamSimple: (...args: Parameters<typeof ai.streamSimple>) => streaming(...args) }));
 // Module-loading boundary: install the fake provider before importing its consumer.
-const { createCompressor } = await import('../src/compactor.ts');
+const { createCompressor, createOrderTask } = await import('../src/compactor.ts');
 const model = buildModel({ id: 'fixture', name: 'Fixture', api: 'anthropic-messages', provider: 'fixture', baseUrl: 'https://invalid.local', reasoning: false, input: ['text'], cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0 }, contextWindow: 200000, maxTokens: 1000 });
 // Registry facade implements exactly the two methods the compressor consumes.
 const registry = { find: () => model, getApiKey: async () => 'synthetic' } as unknown as ModelRegistry;
@@ -79,4 +79,45 @@ test('a failing primer releases a waiting longer prefix instead of hanging', asy
   await new Promise(r => setTimeout(r, 20)); assert.equal(calls.length, 1);
   calls[0].fail(); await new Promise(r => setTimeout(r, 20)); assert.equal(calls.length, 2);
   calls[1].finish(); assert.equal(await first, 'overloaded'); assert.equal(await longer, 'summary');
+});
+const streamOnce = (text: (k: number) => string) => { let calls = 0; streaming = () => { const k = calls++; const stream = ai.createAssistantMessageEventStream(); const message = reply(text(k)); queueMicrotask(() => { stream.push({ type: 'done', reason: 'stop', message }); stream.end(); }); return stream; }; return () => calls; };
+test('(a) the summary line is the 512-byte line; ORDERS come back beside it, and the compaction task asks for them', async () => {
+  const orders = { '40': [{ said: 'Never push', text: 'Never push', kind: 'rule' }] };
+  const calls = streamOnce(() => `user: kept\nORDERS:\n${JSON.stringify(orders)}`);
+  const result = await compressor()({ ...input, scan: [40] }, new AbortController().signal);
+  assert.deepEqual(result, { text: 'user: kept', orders: new Map([[40, [{ said: 'Never push', text: 'Never push', kind: 'rule' }]]]) });
+  assert.equal(calls(), 1);
+  assert.match(compaction({ source: 'user: hi', part: { l: 0, i: 40 }, scan: [40] }), /ORDERS:/);
+});
+test('(c) the ORDERS section is not counted in the 512-byte line, so long orders do not force a retry', async () => {
+  const orders = { '40': [{ said: 'z'.repeat(700), text: 'short', kind: 'rule' }] };
+  const calls = streamOnce(() => `user: kept\nORDERS:\n${JSON.stringify(orders)}`);
+  const result = await compressor()({ ...input, scan: [40] }, new AbortController().signal);
+  assert.equal(calls(), 1);
+  assert.equal(result.text, 'user: kept');
+});
+test('(c) a too-long line retries, and the shortest line keeps the orders of its own reply', async () => {
+  const lengths = [700, 650, 600, 620, 610];
+  const calls = streamOnce(k => `${'x'.repeat(lengths[k])}\nORDERS:\n${JSON.stringify({ '40': [{ said: `order-${k}`, text: `order-${k}`, kind: 'rule' }] })}`);
+  const result = await compressor()({ ...input, scan: [40] }, new AbortController().signal);
+  assert.equal(calls(), 5);
+  assert.equal(result.text.length, 600);
+  assert.deepEqual(result.orders.get(40), [{ said: 'order-2', text: 'order-2', kind: 'rule' }]);
+});
+test('(d) invalid ORDERS JSON leaves the scanned messages unrecorded and does not fail the line', async () => {
+  const calls = streamOnce(() => 'user: kept\nORDERS:\n{"40": [oops');
+  const result = await compressor()({ ...input, scan: [40] }, new AbortController().signal);
+  assert.equal(result.text, 'user: kept');
+  assert.equal(calls(), 1);
+  assert.equal(result.orders?.has(40) ?? false, false);
+});
+test('(h) order tasks think at medium even when the compactor is set to xhigh', async () => {
+  const thinking = buildModel({ id: 'reasoner', name: 'Reasoner', api: 'anthropic-messages', provider: 'fixture', baseUrl: 'https://invalid.local', reasoning: true, input: ['text'], cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0 }, contextWindow: 200000, maxTokens: 1000 });
+  const seen: unknown[] = [];
+  streaming = (_model, _context, options) => { seen.push(options?.reasoning); const stream = ai.createAssistantMessageEventStream(); const message = reply('[]'); queueMicrotask(() => { stream.push({ type: 'done', reason: 'stop', message }); stream.end(); }); return stream; };
+  const reasonRegistry = { find: () => thinking, getApiKey: async () => 'synthetic' } as unknown as ModelRegistry;
+  const task = createOrderTask(reasonRegistry, () => ({ provider: 'fixture', model: 'reasoner', thinking: 'xhigh' }));
+  await task({ kind: 'consolidate', ledger: { through: -1, items: [] }, records: [], through: 0 }, new AbortController().signal);
+  await task({ kind: 'backfill', items: [] }, new AbortController().signal);
+  assert.deepEqual(seen, ['medium', 'medium']);
 });
