@@ -22,7 +22,7 @@ export default function optchat(pi: ExtensionAPI) {
   /** The run's first message as OMP holds it (asUser turns shown custom messages into user ones for the log). */
   let runFirst: AgentMessage | undefined;
   let view: string | undefined, memories = '', lastStart: AgentMessage | undefined;
-  let runLimit = defaults.runLimit, cut: AgentMessage | undefined;
+  let runLimit = defaults.runLimit, recall = defaults.memories, cut: AgentMessage | undefined;
   const seen = new Set<string>();
   /** The previous run's last message: everything after it opens the next run, even before that run's first message_end ran. */
   let lastEnd: AgentMessage | undefined;
@@ -70,7 +70,7 @@ export default function optchat(pi: ExtensionAPI) {
       mkdirSync(dir, { recursive: true, mode: 0o700 });
       release = await lockProfile(dir, `OMP PID ${process.pid} (${ctx.cwd})`);
       const config = loadConfig(dir);
-      runLimit = config.runLimit;
+      runLimit = config.runLimit; recall = config.memories;
       memory = await Memory.open(dir, createCompressor(ctx.modelRegistry, () => config.compactor), text => ctx.ui.notify(text, 'warning'));
       agents = new AgentIndex(dir, text => ctx.ui.notify(text, 'warning'), () => ctx.sessionManager.getSessionFile());
       const setting = lookup('compaction.enabled');
@@ -92,7 +92,7 @@ export default function optchat(pi: ExtensionAPI) {
   pi.on('before_agent_start', (event, ctx) => {
     if (!active(ctx)) return;
     const prepared = preparePrompt(event.systemPrompt);
-    memories = prepared.memories;
+    memories = recall ? prepared.memories : '';
     return { systemPrompt: prepared.systemPrompt };
   });
   pi.on('agent_start', (_event, ctx) => {

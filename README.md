@@ -68,17 +68,21 @@ Summarizer model (default `anthropic/claude-haiku-5-5`, medium effort): edit
 `~/.omp/optchat/<profile>/config.json`:
 
 ```json
-{ "compactor": { "provider": "anthropic", "model": "claude-haiku-5-5", "thinking": "medium" }, "runLimit": 256000 }
+{ "compactor": { "provider": "anthropic", "model": "claude-haiku-5-5", "thinking": "medium" }, "runLimit": 256000, "memories": false }
 ```
 
 `runLimit` is a positive integer UTF-8 byte limit for the raw run tail (default 256000, about 64k tokens); long runs refresh their memory view at the latest assistant boundary while retaining the original task and intact assistant/tool-result tail.
+
+`memories` (default `false`): whether OMP's per-turn memory recall (`<memories>`, e.g. Mnemopi) is sent in OptChat
+sessions. Off, the view and `zoom` are the only memory and each turn start writes about 1k fewer tokens to the cache.
+Plain OMP sessions keep their recall either way; OMP still saves facts from OptChat sessions for them.
 
 ## What it changes in OMP (only when the flag is set)
 
 - The model sees `[tools][system][memory view][current turn]`; OMP's own history stays on disk but is not sent.
 - OMP's auto-compaction is turned off for that session.
-- Per-turn memory recall (`<memories>`) and the date/cwd reminder are moved after the view, so they never
-  invalidate the cached view.
+- Per-turn memory recall (`<memories>`) is dropped (or, with `"memories": true`, moved after the view), and the
+  date/cwd reminder is moved after the view, so neither invalidates the cached view.
 - Anthropic cache marks are placed on the view (copying OMP's TTL, e.g. 1 h on subscriptions).
 - Subagents (`task`) and advisors run unchanged.
 

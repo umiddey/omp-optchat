@@ -40,7 +40,7 @@ their results are logged like any tool result.
 |---|---|
 | `session_start` | open memory + lock; activate tools `zoom`,`date`; runtime-override OMP auto-compaction off (setting `compaction.enabled`, `pi-coding-agent/src/session/context-settings.ts`; `lookup(id).override(pi.pi.settings,false)`, never persisted); status line. |
 | `session_before_compact` | `{ cancel: true }` (backstop). |
-| `before_agent_start` | Return `systemPrompt` = `event.systemPrompt` with (a) every element starting with `<memories>` removed and stashed for this run, (b) the OptChat static prompt inserted as its own element immediately before the first element starting with `<project-context>` (or appended if none). Static = byte-identical every call: no dates, ids, counts. |
+| `before_agent_start` | Return `systemPrompt` = `event.systemPrompt` with (a) every element starting with `<memories>` removed; it is stashed for this run only when the profile config sets `"memories": true` (default `false`: recall is dropped, since it changes every turn and would be rewritten at every turn start), (b) the OptChat static prompt inserted as its own element immediately before the first element starting with `<project-context>` (or appended if none). Static = byte-identical every call: no dates, ids, counts. |
 | `message_end` | Buffer the message in `run` (pi-optchat `index.ts` 326-362 pattern). Messages are logged after the initial view is frozen; mid-run rollover may incorporate them into the next frozen view. |
 | `context` | See below. |
 | `before_provider_request` | Anthropic payloads only (`ctx.model?.api === "anthropic-messages"`): cache marks (below). Other APIs: return payload unchanged. |
