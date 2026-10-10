@@ -4,32 +4,54 @@ import type { Entry } from './memory.ts';
 import { appendJson, atomicWrite } from './store.ts';
 
 export const ORDER_LIMIT = 16_000;
-export interface ExtractedOrders { i: number; date: string; orders: string[] }
-export interface OrderItem { text: string; from: number[]; date: string }
+export interface StandingOrder { text: string; kind: 'rule' | 'goal'; until?: string }
+export interface Retirement { retire: (string | number)[] }
+interface RetirementEvent extends Retirement { i: number }
+export type OrderDirective = StandingOrder | Retirement;
+export interface ExtractedOrders { i: number; date: string; orders: OrderDirective[] }
+export interface OrderItem extends StandingOrder { from: number[]; date: string }
 export interface Ledger { through: number; items: OrderItem[] }
 export interface OrderExtraction { kind: 'extract'; entry: Entry; context: string }
 export type OrderInput = OrderExtraction | { kind: 'consolidate'; ledger: Ledger; records: ExtractedOrders[]; through: number };
 export type OrderTask = (input: OrderInput, signal: AbortSignal) => Promise<unknown>;
 const eligible = (entry: Entry) => entry.kind === 'user' && !/^\[[^\]\r\n]+\] /.test(entry.text);
-function strings(value: unknown): string[] {
- if (!Array.isArray(value) || !value.every(s => typeof s === 'string' && s.trim())) throw Error('Orders extraction must return an array of nonempty strings.');
- return value.map(s => s.trim());
+function standing(value: unknown): StandingOrder {
+ if (typeof value === 'string' && value.trim()) return { text: value.trim(), kind: 'rule' };
+ if (typeof value !== 'object' || !value || !('text' in value) || typeof value.text !== 'string' || !value.text.trim()) throw Error('Invalid standing order.');
+ const kind = 'kind' in value ? value.kind : 'rule';
+ if (kind !== 'rule' && kind !== 'goal') throw Error('Invalid order kind.');
+ const until = 'until' in value ? value.until : undefined;
+ if (until !== undefined && (kind !== 'goal' || typeof until !== 'string' || !until.trim())) throw Error('Invalid goal done-condition.');
+ return { text: value.text.trim(), kind, ...(typeof until === 'string' ? { until: until.trim() } : {}) };
+}
+function retireTargets(value: unknown): (string | number)[] {
+ if (!Array.isArray(value) || !value.length || !value.every(v => typeof v === 'string' ? !!v.trim() : Number.isSafeInteger(v) && v >= 0)) throw Error('Invalid retirement targets.');
+ return value.map(v => typeof v === 'string' ? v.trim() : v);
+}
+function directives(value: unknown): OrderDirective[] {
+ if (!Array.isArray(value)) throw Error('Orders extraction must return an array.');
+ return value.map((v: unknown) => typeof v === 'object' && v && 'retire' in v ? { retire: retireTargets(v.retire) } : standing(v));
+}
+function retired(item: OrderItem, events: readonly RetirementEvent[]) {
+ return events.some(event => Math.max(...item.from) <= event.i && event.retire.some(target =>
+  typeof target === 'number' ? item.from.includes(target) : item.text.toLowerCase().includes(target.toLowerCase())));
 }
 function items(value: unknown): OrderItem[] {
  if (!Array.isArray(value)) throw Error('Ledger must be an array.');
  return value.map((v: unknown) => {
   if (typeof v !== 'object' || !v || !('text' in v) || typeof v.text !== 'string' || !v.text.trim() || !('date' in v) || typeof v.date !== 'string' || !('from' in v) || !Array.isArray(v.from) || !v.from.length || !v.from.every(i => Number.isSafeInteger(i) && i >= 0)) throw Error('Invalid ledger item.');
-  return { text: v.text.trim(), from: v.from as number[], date: v.date };
+  return { ...standing(v), from: v.from as number[], date: v.date };
  });
 }
-export function renderOrders(list: readonly OrderItem[]) {
- return list.length ? `<orders>\n${list.map(item => `${Math.max(...item.from)} (${item.date.slice(0, 10)}): ${item.text}`).join('\n')}\n</orders>` : '';
+export function renderOrders(list: readonly OrderItem[], through: number) {
+ return list.length ? `<orders through="${through}">\n${list.map(item => `${Math.max(...item.from)} [${item.kind}${item.until ? ` until: ${item.until}` : ''}] (${item.date.slice(0, 10)}): ${item.text}`).join('\n')}\n</orders>` : '';
 }
 /** Independent of the summary tree. Extraction is background; only batch/first-backfill publication changes the prefix. */
 export class Orders {
  readonly records = new Map<number, ExtractedOrders>();
  ledger: Ledger = { through: -1, items: [] };
  private raw: OrderItem[] = [];
+ private retire: RetirementEvent[] = [];
  private pending = new Map<number, OrderExtraction>();
  private lastReply = '';
  private replyContinues = false;
@@ -48,7 +70,7 @@ export class Orders {
   if (existsSync(file)) for (const line of readFileSync(file, 'utf8').split('\n').filter(Boolean)) {
    const r = JSON.parse(line);
    if (!Number.isSafeInteger(r.i) || typeof r.date !== 'string' || this.records.has(r.i)) throw Error('Invalid/duplicate orders record.');
-   this.records.set(r.i, { i: r.i, date: r.date, orders: strings(r.orders) });
+   this.records.set(r.i, { i: r.i, date: r.date, orders: directives(r.orders) });
   }
   const ledger = join(directory, 'ledger.json');
   if (existsSync(ledger)) {
@@ -56,6 +78,13 @@ export class Orders {
    if (!Number.isSafeInteger(saved.through) || saved.through < -1) throw Error('Invalid ledger boundary.');
    this.ledger = { through: saved.through, items: items(saved.items) }; this.loaded = true;
    if (saved.raw !== undefined) this.raw = items(saved.raw);
+   if (saved.retire !== undefined) {
+    if (!Array.isArray(saved.retire)) throw Error('Invalid pending retirements.');
+    this.retire = saved.retire.map((event: unknown) => {
+     if (typeof event !== 'object' || !event || !('i' in event) || typeof event.i !== 'number' || !Number.isSafeInteger(event.i) || event.i < 0 || !('retire' in event)) throw Error('Invalid pending retirement.');
+     return { i: event.i, retire: retireTargets(event.retire) };
+    });
+   }
   }
  }
  backfill(entries: readonly Entry[]) {
@@ -91,7 +120,7 @@ export class Orders {
    if (this.busy.size >= this.jobs) break;
    if (this.busy.has(i) || (this.retry.get(i) ?? 0) > Date.now()) continue;
    const work = Promise.resolve().then(async () => {
-    const orders = strings(await this.task(input, this.controller.signal));
+    const orders = directives(await this.task(input, this.controller.signal));
     if (this.stopped) return;
     const record = { i, date: input.entry.date, orders };
     appendJson(join(this.directory, 'orders.jsonl'), record);
@@ -119,21 +148,33 @@ export class Orders {
    await this.extracted(through);
    const records = [...this.records.values()].filter(r => r.i > this.ledger.through && r.i <= through).sort((a, b) => a.i - b.i);
    if (through <= this.ledger.through) return;
+   const targets = records.flatMap(r => r.orders.flatMap(order => 'retire' in order ? [{ i: r.i, retire: order.retire }] : []));
    for (let attempt = 0; attempt < 3; attempt++) try {
-    const next = items(await this.task({ kind: 'consolidate', ledger: this.ledger, records, through }, this.controller.signal));
+    const next = items(await this.task({ kind: 'consolidate', ledger: this.ledger, records, through }, this.controller.signal)).filter(item => !retired(item, targets));
+    const goals = records.flatMap(r => r.orders.flatMap(order => !('retire' in order) && order.kind === 'goal' ? [{ ...order, from: [r.i], date: r.date }] : []));
+    for (const previous of [...this.ledger.items, ...goals]) {
+     if (retired(previous, targets)) continue;
+     const retained = next.some(item => item.from.some(id => previous.from.includes(id))
+      && item.kind === previous.kind
+      && (item.text.includes(previous.text) || (previous.kind === 'goal' && previous.until !== undefined && item.until?.includes(previous.until))));
+     const replaced = next.some(item => item.from.some(id => records.some(r => r.i === id && r.i > Math.max(...previous.from) && r.orders.some(order => !('retire' in order))))
+      && previous.from.some(id => item.text.includes(`(replaces msg ${id})`)));
+     if (!retained && !replaced) throw Error(`Only user words can retire or replace an order; model omitted active order: ${previous.text}`);
+    }
     const sources = new Map<number, string>();
     for (const item of this.ledger.items) for (const id of item.from) sources.set(id, item.date);
-    for (const r of records) sources.set(r.i, r.date);
+    for (const r of records) if (r.orders.some(order => !('retire' in order))) sources.set(r.i, r.date);
     for (const item of next) {
      if (item.from.some(id => !sources.has(id))) throw Error('Ledger invented a source id.');
      item.date = sources.get(Math.max(...item.from))!;
     }
-    if (Buffer.byteLength(renderOrders(next), 'utf8') > ORDER_LIMIT) throw Error('Ledger exceeds 16000 UTF-8 bytes; combine related orders without dropping any.');
+    if (Buffer.byteLength(renderOrders(next, through), 'utf8') > ORDER_LIMIT) throw Error('Ledger exceeds 16000 UTF-8 bytes; combine related orders without dropping any.');
     const saved = { through, items: next };
-    atomicWrite(join(this.directory, 'ledger.json'), JSON.stringify(saved)); this.ledger = saved; this.raw = []; this.loaded = true; return;
+    atomicWrite(join(this.directory, 'ledger.json'), JSON.stringify(saved)); this.ledger = saved; this.raw = []; this.retire = []; this.loaded = true; return;
    } catch (error) { if (this.stopped) return; this.warn(`Orders consolidation: ${String(error)}`); }
-   this.raw = records.flatMap(r => r.orders.map(text => ({ text, from: [r.i], date: r.date })));
-   atomicWrite(join(this.directory, 'ledger.json'), JSON.stringify({ ...this.ledger, raw: this.raw }));
+   this.raw = records.flatMap(r => r.orders.flatMap(order => 'retire' in order ? [] : [{ ...order, from: [r.i], date: r.date }]));
+   this.retire = targets;
+   atomicWrite(join(this.directory, 'ledger.json'), JSON.stringify({ ...this.ledger, raw: this.raw, ...(targets.length ? { retire: targets } : {}) }));
   }).catch(error => { if (!this.stopped) this.warn(`Orders publication: ${String(error)}`); });
   return this.publication;
  }
@@ -147,6 +188,6 @@ export class Orders {
    void work.finally(() => signal.removeEventListener('abort', abort));
   })]);
  }
- render() { return renderOrders([...this.ledger.items, ...this.raw]); }
+ render() { return renderOrders([...this.ledger.items, ...this.raw].filter(item => !retired(item, this.retire)), this.ledger.through); }
  async close() { this.stopped = true; this.controller.abort(); clearTimeout(this.timer); this.notify(); await Promise.allSettled(this.busy.values()); await this.publication; await this.bootstrap; }
 }

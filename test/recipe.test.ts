@@ -10,7 +10,7 @@ import { Memory } from '../src/memory.ts';
 test('compactor equals recipe §5; turn adds only the deliberate standing-orders extension', () => {
   const recipe = readFileSync(new URL('./fixtures/recipe-prompt.txt', import.meta.url), 'utf8').trimEnd();
   assert.equal(COMPACT, recipe);
-  assert.equal(OPTCHAT_PROMPT, recipe + `\n\n<orders> holds the user's standing orders in their own words. They stay in force until the user changes them and override any summary that says otherwise. Use zoom(id, 1) for context.`);
+  assert.equal(OPTCHAT_PROMPT, recipe + `\n\n<orders through="N"> holds the user's standing orders as of message N, in their own words. They override conflicting summaries; the user's newer messages in the view can change or retire them and then win. For a goal, when its done-condition is met, say so in the reply with the evidence and ask the user whether to retire it; never treat it as retired without the user's words. Only the user's words create, change or retire an order. Use zoom(id, 1) for context.`);
 });
 test('new profiles default to xhigh and existing explicit effort is unchanged', () => {
   const dir = mkdtempSync(join(tmpdir(), 'optchat-recipe-config-'));

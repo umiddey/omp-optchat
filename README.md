@@ -82,10 +82,10 @@ Plain OMP sessions keep their recall either way; OMP still saves facts from OptC
 ## Standing orders ledger
 
 OptChat keeps standing goals, rules, constraints, prohibitions, preferences and decisions outside
-the summary tree, near-verbatim. They appear as an `<orders>` block before `<chat>` on every
+the summary tree, near-verbatim. They appear as an `<orders through="N">` block before `<chat>` on every
 request. New orders remain in recent view lines until the next view merge batch, when the ledger
 is consolidated: newest contradictory instructions replace earlier ones, and duplicates merge.
-The static turn prompt gives orders priority over conflicting summaries; `zoom(id, 1)` gives context.
+The static prompt gives orders priority over conflicting summaries, but newer user messages can change or retire them and win. `zoom(id, 1)` gives context.
 This is a deliberate extension beyond Taelin's recipe, not a change to existing summary nodes.
 
 No extra config: extraction and consolidation use `compactor`'s model and effort. Extraction runs
@@ -102,14 +102,33 @@ option as `"user's words" (chosen: option text)`, but the reply is never itself 
 Consolidation keeps user wording rather than interpreting it; only resolved-choice annotations
 and `(replaces msg N)` are allowed, not explanatory notes or spelling corrections.
 
+Only the user's words create, change or retire an order. `rule` means how to work with no end;
+`goal` means something to achieve, with `until` holding its done-condition in the user's words
+or resolved from context. When the agent has evidence a goal is done, it must report that evidence
+and ask whether to retire it—not silently expire it. A user saying "that's done", "drop the MR
+watch", or "yes retire it" creates a retirement directive; the next batch removes targeted items.
+Retired instructions stay in extraction history but are not rendered.
+
+For example:
+```text
+<orders through="2681">
+24 [goal until: PM gate shows 0 missing/0 waived/0 baselined and PM pushed] (2026-10-09): Goal: every endpoint and table proven by a witnessed real UI test, 0 waived, 0 baselined; push PM when green locally
+2681 [rule] (2026-10-10): i can be okay with you pushing it with no verify but YOU HAVE TO ensure that we fix them eventually
+</orders>
+```
+If a goal has no user-specified or resolvable done-condition, it renders `[goal]` without
+inventing one. The `through` header changes only with ledger publication.
+
 Profile files:
-- `orders.jsonl`: append-only, flushed `{i,date,orders:[strings]}` extraction records. Open it as
-  JSONL, or use `jq -c 'select(.orders | length > 0)' ~/.omp/optchat/main/orders.jsonl`.
-- `ledger.json`: atomic `{through,items:[{text,from:[ids],date}]}` snapshot, loaded without
+- `orders.jsonl`: append-only, flushed `{i,date,orders:[directives]}`. Directives are
+  `{text,kind:"rule"|"goal",until?:string}` or `{retire:[text or numeric source ids]}`.
+  Legacy string entries load as `{text,kind:"rule"}` without rewriting the file. Read it as JSONL,
+  or use `jq -c 'select(.orders | length > 0)' ~/.omp/optchat/main/orders.jsonl`.
+- `ledger.json`: atomic `{through,items:[{text,kind,until?,from:[ids],date}]}` snapshot, loaded without
   recomputation at restart. `through` is the inclusive last incorporated message id. Read active
   instructions with `jq '.items' ~/.omp/optchat/main/ledger.json`; newest source id labels each item.
-  After failed consolidation, optional `raw` stores unconsolidated orders beside the old snapshot,
-  so restart also preserves the fallback.
+  After failed consolidation, optional `raw` stores unconsolidated orders and `retire` stores
+  pending user retirement targets beside the old snapshot, so restart preserves the fallback.
 
 Consolidated rendered orders are bounded to 16,000 UTF-8 bytes. Oversized or invalid outputs retry,
 never truncate. If consolidation fails three attempts, old instructions plus raw new orders are

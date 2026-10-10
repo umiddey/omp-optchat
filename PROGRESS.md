@@ -478,3 +478,74 @@ Latest full block, extraction records and acceptance table supersede the earlier
 at `/tmp/optchat-ledger-results.md`. Temporary script, profile and credential copies are removed
 before committing. No id-specific exclusions, push, merge, publish or install.
 
+
+### Addition D: user-owned expiry and typed orders
+
+Only the user's words create, change or retire an order. Extraction now returns
+`{text,kind:"rule"|"goal",until?:string}` or `{retire:[text or numeric source ids]}` directives.
+Legacy string extraction records and old untyped ledger items load as rules, without rewriting
+history or recomputing the ledger. Rules describe continuing working policy; goals hold
+user-worded/resolved done-conditions. Missing conditions remain unspecified, never invented.
+
+Render is `<orders through="N">` followed by typed rule/goal labels, source dates and wording.
+The static turn paragraph says newer user words in the view can change/retire orders and win;
+on apparent completion the agent reports evidence and asks the user whether to retire the goal.
+Recorded retirements remove targeted items at the next batch; assistant status/model judgement
+do not. Pending retirements keep their own source ids, so a newer user can reintroduce an order
+in the same batch. Fallback retirement events persist atomically beside raw orders.
+
+Consolidation validates retention of existing orders/new goals and valid authority sources.
+An empty or retirement-only extraction cannot become a new standing-order source.
+Replacement uses the owner's generic rule: explicit user change/replacement, or instructions
+that cannot both be followed. Overlap/broader goals are not replacements; ambiguous tension
+keeps both verbatim, without interpretation. No topic/id-specific replacement exceptions.
+
+| Acceptance | PASS/FAIL | Evidence |
+|---|---|---|
+| D kind/until and header red | PASS | artifact://443: fields stripped before implementation; green typed persistence/render/through assertions |
+| Legacy strings red | PASS | artifact://443: received strings rather than rule objects; green and history bytes unchanged |
+| Retirement parsing/batch red | PASS | artifact://445: constructor assertion failed on retire record; green removes target only at batch, preserves history |
+| No model/assistant expiry red | PASS | artifact://443: goal disappeared; green conservative retention/fallback |
+| Later user reintroduces retired order red | PASS | artifact://455: rendered empty; green source-ordered retirement |
+| Eligibility before kind red | PASS | artifact://451: missing contract; green prevents calling an immediate task a standing goal |
+| Replacement authority reds | PASS | artifact://459 then generic owner contract artifact://466; green |
+| Empty-source authority red | PASS | artifact://470: empty message credited as source; green rejects model source invention |
+| Complete final tests/tsc | PASS | `bun test && bun run typecheck`, exit 0; 112 pass, 0 fail, 14 files, 113 expect calls; tsc --noEmit exit 0 |
+| Fresh final real replay | PASS | `bun scripts/ledger-eval.ts`, exit 0; new live-profile and credential copies; 3925 entries, 195 user entries, 95 shown-custom exclusions, 100 extraction records |
+| PM full goal and push condition | PASS | At 24: every endpoint/table, witnessed real UI, 0 waived, 0 baselined; push PM when green locally |
+| 2681 condition | PASS | Full permission plus eventual-fix condition, one goal; until “the 1858 entries are fixed” resolves “them” from reply 2680 |
+| 3234 choice | PASS | Rule `"eclude and delete" (chosen: exclude them from the gate and delete the dead code)` |
+| Compatible orders/real user replacement | PASS | PM goal and exclude/delete coexist; 850 prohibition replaces prior MR-opening goal but leaves attachments/internet goals |
+| Typed item count/bound/header | PASS | 49 standing objects, 0 retirement directives, 46 items (35 rules/11 goals), 6611 rendered UTF-8 bytes, through 3924 |
+| Final cost/wall | PASS | Model-reported $0.052520775; 101 calls (100 extraction + 1 consolidation); 167.781s model work, 172.67s process |
+| Every remaining one-off | PASS for this sample | Reviewed every extracted object and ledger item: none judged one-off; 406/637/891/932/3634 [], 2849 deployment approval excluded |
+
+Five of eleven goals have explicit/resolved conditions; six do not. The final copied history has
+no retirement directive, so retirement behavior is evidenced by deterministic tests, not a
+claim of a real-profile retirement. The MR watch is intentionally a goal under D, superseding
+the earlier one-off judgement. Product capabilities/ongoing stream goals are not counted as
+implementation-task approvals. Near-verbatim remains a model contract, not exact transcription
+or a universal semantic guarantee.
+
+All typed replays are reported (no discarded failures):
+
+| Trial | Orders/items/bytes | PM / 2681 / 3234 | Calls | USD | Seconds |
+|---|---|---|---:|---:|---:|
+| D1 initial typing | 51 / 46 / 6836 | PASS / PASS / FAIL (extraction []) | 101 | 0.060363825 | 184.326 |
+| D2 eligibility clarification | 51 / 46 / 6641 | PASS / PASS / PASS | 101 | 0.060395160 | 201.851 |
+| D3 user-change clarification | 45 / 40 / 6293 | PASS / PASS / FAIL (model replaced it with 3344) | 101 | 0.057961150 | 209.064 |
+| D4 generic explicit-change/mutual-impossibility authority | 49 / 46 / 6611 | PASS / PASS / PASS | 101 | 0.052520775 | 167.781 |
+
+D1 leaked local execution-plan approvals at 932; D2 removed those but retained a contradictory
+old MR-opening feature; D3 fixed that but inferred a broader goal replaced exclude/delete.
+The owner confirmed both must stay and supplied the generic rule used in D4. Each prompt
+correction followed a demonstrated discrepancy and an assertion-level red, not unchanged
+retries or favorable-output selection. An initially proposed topic-specific assertion was
+superseded by the owner's generic direction before topic-specific replacement logic landed.
+
+Typed replay totals: $0.231240910, 404 calls, 763.022s. Whole-assignment measured totals including
+original ledger and A–C: $0.334339995, 600 calls, 1149.875s. Costs are model-reported estimates.
+Full final rendered block with kinds/until, all extraction records, detailed PASS/FAIL and all
+trial accounting: `/tmp/optchat-ledger-results.md`. Temporary evaluation script/profile/agent.db
+are removed before final commit; no live profile/main checkout edits or install/push/merge/publish.
+

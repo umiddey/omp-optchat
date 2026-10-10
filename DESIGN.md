@@ -96,6 +96,40 @@ allowed annotations are `(replaces msg N)` and the already-extracted `(chosen: .
 These restrictions are prompt contracts; real-model replay measures compliance separately
 from deterministic context/persistence tests.
 
+Extraction records now contain typed directives: `{text,kind:"rule"|"goal",until?:string}` and
+`{retire:[text or numeric source ids]}`. Legacy string records load as rules without rewriting
+history; old untyped ledger items likewise load as rules. Rules describe continuing work policy;
+goals carry user-worded/resolved done-conditions, never an invented expiration. User completion,
+drop or retirement messages (including contextual "yes retire it") are the only retirement
+authority. Assistant status and model judgement are not.
+
+Consolidation applies recorded retirement targets (numeric source ids or identifying text) and
+validates that existing items and newly extracted goals remain represented unless the user
+retires them or a newer user directive explicitly replaces them. Replacement annotations must
+reference the earlier source id and have a newer user-order source. Kind and goal condition
+must remain represented; a silent model omission rejects the result. Failed consolidation
+keeps active old/raw orders and applies explicit user retirement targets, durably saved in the
+optional `retire` field beside `raw`; history remains append-only.
+Each pending retirement carries its user message id (`{i,retire:[targets]}`). Matching source ids
+or identifying text can remove only items whose newest source is not later than that retirement:
+a newer user can reintroduce the same order in the same batch. Eligibility is decided before
+rule/goal typing; classifying a local implementation plan as a goal does not make it standing.
+Persistent coverage/gate-scope, retention, access and default choices are policy changes, not
+single-command approvals.
+User-authorized replacement is distinct from model-owned expiry. An order is replaced only if
+the user says it changes/replaces it, or both cannot be followed at the same time. Overlap and
+broader goals are not replacements; ambiguous tension keeps both orders verbatim without an
+interpretation for the turn model/owner to resolve. A truly incompatible goal can be replaced
+before completion, with the newer order's replacement annotation; unrelated goals stay.
+Empty extractions and retirement-only messages cannot be credited as new standing-order sources.
+
+Render uses `<orders through="N">`, then `id [rule] (date): text` or
+`id [goal until: user-worded condition] (date): text`. Unspecified conditions render `[goal]`,
+never a fabricated condition. The static turn paragraph says orders are current as of N;
+newer user words in the view can change/retire them and take precedence. On apparent goal
+completion the agent must reply with evidence and ask the user whether to retire it, never
+remove it on its own. Header, kinds and conditions remain byte-stable between batches.
+
 Only a chat view merge batch publishes subsequent ledger changes. Its inclusive message point
 selects extraction records after `ledger.through`; the turn waits for extraction and consolidation
 at that boundary, like summary completion. New view and ledger are captured together for the
