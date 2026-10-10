@@ -165,6 +165,16 @@ test('D user retire record removes targeted item only at the next consolidation'
   expect(readFileSync(join(dir, 'orders.jsonl'), 'utf8')).toContain('\"retire\":[0]');
  } finally { await o?.close(); rmSync(dir, { recursive: true, force: true }); }
 });
+test('B a text retire phrase retires only the items carrying its content words, not every item sharing a stopword', async () => {
+ const dir = mkdtempSync(join(tmpdir(), 'orders-retire-b-')); let o: Orders | undefined;
+ writeFileSync(join(dir, 'orders.jsonl'), [{ i: 3, date: '2026-10-10', orders: [{ retire: ['The MR watch rule'] }] }].map(r => JSON.stringify(r)).join('\n') + '\n');
+ writeFileSync(join(dir, 'ledger.json'), JSON.stringify({ through: 2, items: [{ text: 'Watch CP MR !103', kind: 'goal', until: 'CP MR !103 merged', from: [0], date: '2026-10-10' }, { text: 'Always check the rule', kind: 'rule', from: [2], date: '2026-10-10' }] }));
+ try {
+  o = new Orders(dir, async input => input.kind === 'consolidate' ? input.ledger.items : [], () => {});
+  await o.batch(3);
+  expect(o.render()).not.toContain('Watch CP MR !103'); expect(o.render()).toContain('Always check the rule');
+ } finally { await o?.close(); rmSync(dir, { recursive: true, force: true }); }
+});
 test('D assistant completion and model judgement cannot retire a goal', async () => {
  const dir = mkdtempSync(join(tmpdir(), 'orders-no-expiry-'));
  writeFileSync(join(dir, 'ledger.json'), JSON.stringify({ through: 0, items: [{ text: 'Watch CP MR !103', kind: 'goal', until: 'CP MR !103 merged', from: [0], date: '2026-10-10' }] }));
