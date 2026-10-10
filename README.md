@@ -94,6 +94,14 @@ messages containing no standing order. Existing profiles backfill missing ids on
 their first ledger appears at a subsequent turn start after completion. Normal turns do not wait
 for extraction; a view rewrite waits for its consolidation with the usual working message.
 
+Standing means an instruction keeps applying beyond the current task. One-off agent assignments,
+action approvals, pushing a particular change, or installing/restarting it are not standing orders.
+To understand a short answer that chooses a lasting policy, extraction also receives the preceding
+assistant reply (consecutive reply chunks, last 4,000 UTF-8 bytes). It may resolve the user's chosen
+option as `"user's words" (chosen: option text)`, but the reply is never itself a source of orders.
+Consolidation keeps user wording rather than interpreting it; only resolved-choice annotations
+and `(replaces msg N)` are allowed, not explanatory notes or spelling corrections.
+
 Profile files:
 - `orders.jsonl`: append-only, flushed `{i,date,orders:[strings]}` extraction records. Open it as
   JSONL, or use `jq -c 'select(.orders | length > 0)' ~/.omp/optchat/main/orders.jsonl`.

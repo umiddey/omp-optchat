@@ -7,7 +7,8 @@ export const ORDER_LIMIT = 16_000;
 export interface ExtractedOrders { i: number; date: string; orders: string[] }
 export interface OrderItem { text: string; from: number[]; date: string }
 export interface Ledger { through: number; items: OrderItem[] }
-export type OrderInput = { kind: 'extract'; entry: Entry } | { kind: 'consolidate'; ledger: Ledger; records: ExtractedOrders[]; through: number };
+export interface OrderExtraction { kind: 'extract'; entry: Entry; context: string }
+export type OrderInput = OrderExtraction | { kind: 'consolidate'; ledger: Ledger; records: ExtractedOrders[]; through: number };
 export type OrderTask = (input: OrderInput, signal: AbortSignal) => Promise<unknown>;
 const eligible = (entry: Entry) => entry.kind === 'user' && !/^\[[^\]\r\n]+\] /.test(entry.text);
 function strings(value: unknown): string[] {
@@ -29,7 +30,9 @@ export class Orders {
  readonly records = new Map<number, ExtractedOrders>();
  ledger: Ledger = { through: -1, items: [] };
  private raw: OrderItem[] = [];
- private pending = new Map<number, Entry>();
+ private pending = new Map<number, OrderExtraction>();
+ private lastReply = '';
+ private replyContinues = false;
  private busy = new Map<number, Promise<void>>();
  private retry = new Map<number, number>();
  private timer?: ReturnType<typeof setTimeout>;
@@ -65,22 +68,32 @@ export class Orders {
   }
  }
  append(entry: Entry) {
+  if (entry.kind === 'talk') {
+   const reply = Buffer.from((this.replyContinues ? this.lastReply : '') + entry.text);
+   let at = Math.max(0, reply.length - 4000);
+   while (at < reply.length && (reply[at] & 0xc0) === 0x80) at++;
+   this.lastReply = reply.subarray(at).toString('utf8');
+   this.replyContinues = true;
+  } else this.replyContinues = false;
   for (const id of this.retry.keys()) this.retry.set(id, 0);
   this.pump();
-  if (!eligible(entry) || this.records.has(entry.i) || this.pending.has(entry.i) || this.stopped) return;
-  this.pending.set(entry.i, entry); this.pump();
+  if (!eligible(entry) || this.stopped) return;
+  const context = this.lastReply;
+  this.lastReply = '';
+  if (this.records.has(entry.i) || this.pending.has(entry.i)) return;
+  this.pending.set(entry.i, { kind: 'extract', entry, context }); this.pump();
  }
  private notify() { for (const fn of this.changed) fn(); }
  private pump() {
   if (this.stopped) return;
   clearTimeout(this.timer); this.timer = undefined;
-  for (const [i, entry] of this.pending) {
+  for (const [i, input] of this.pending) {
    if (this.busy.size >= this.jobs) break;
    if (this.busy.has(i) || (this.retry.get(i) ?? 0) > Date.now()) continue;
    const work = Promise.resolve().then(async () => {
-    const orders = strings(await this.task({ kind: 'extract', entry }, this.controller.signal));
+    const orders = strings(await this.task(input, this.controller.signal));
     if (this.stopped) return;
-    const record = { i, date: entry.date, orders };
+    const record = { i, date: input.entry.date, orders };
     appendJson(join(this.directory, 'orders.jsonl'), record);
     this.records.set(i, record); this.pending.delete(i); this.retry.delete(i);
    }).catch(error => { if (!this.stopped) { this.warn(`Orders ${i}: ${String(error)}`); this.retry.set(i, Date.now() + this.retryMs); } })

@@ -426,3 +426,55 @@ These look like one-off assignments/approvals, not standing orders. Model consol
 inserted editorial parentheticals and normalized some wording: near-verbatim is not a claim
 of exact transcription. No id-specific whitelist or special case was used.
 
+
+### Orchestrator review corrections A/B/C
+
+Corrections to `bd88928`:
+- A: live and historical extraction now snapshot the preceding assistant reply, joining consecutive
+  `talk` chunks and retaining the final <=4000 valid UTF-8 bytes. Context only resolves references;
+  a short approval may choose a lasting policy, but assistant text cannot itself supply orders.
+- B: extraction explicitly separates beyond-current-task instructions from one-off agent assignments,
+  action/deployment approvals and operations.
+- C: consolidation keeps user wording without interpretation, spelling corrections or explanatory
+  notes. Only `(replaces msg N)` and extracted `(chosen: ...)` annotations are allowed.
+
+README/DESIGN describe the new context and semantic prompt contracts.
+
+| Acceptance | PASS/FAIL | Precise evidence |
+|---|---|---|
+| Assertion-level red A live context | PASS | Before source changes, expected resolved choice, received []; `orders.test.ts:107` |
+| Assertion-level red A backfill tail | PASS | Before source changes, expected context string, received undefined; `orders.test.ts:115` |
+| Assertion-level red B prompt contract | PASS | Before source changes, beyond-current-task policy assertion failed; `orders.test.ts:125` |
+| Assertion-level red C prompt contract | PASS | Before source changes, no-interpretation assertion failed; `orders.test.ts:132` |
+| Red command | PASS | `bun test test/orders.test.ts --test-name-pattern '^(A \|B \|C )'`, exit 1; 0 pass/4 assertion failures, artifact://433 |
+| Full suite and tsc | PASS | `bun test && bun run typecheck`, exit 0; 102 pass/0 fail, 14 files, 85 expect calls; tsc --noEmit exit 0 |
+| Fresh real replay | PASS | New live-profile/credential copies; `bun scripts/ledger-eval.ts`, exit 0; no manual retry/output selection |
+| 3234 resolved decision | PASS | `eclude and delete (chosen: exclude them from the gate and delete the dead code)`; reply 3230 concerns 388 dead PM endpoints |
+| Full PM goal | PASS | At 24: every endpoint/table, witnessed real UI, 0 waived, 0 baselined; push PM when green locally |
+| 2681 conditional push | PASS | Both no-verify permission and `YOU HAVE TO ensure that we fix them eventually` retained in two items with source 2681 |
+| Original five one-off examples | PASS | 406/637/891/3634 now []; 2849 retains ongoing communications requirement, drops deployment approval |
+| No forbidden editorial notes | PASS | Rendered output contains no as-written/possibly-exception/unclear-confirm/typed-correction notes |
+| Remaining one-offs | FAIL (four candidates remain) | Exhaustive contextual review identifies the four below; semantic filtering is not perfect |
+
+Fresh snapshot: 3820 entries; 191 user entries, 94 custom-tagged excluded, 97 extraction
+records and 63 extracted strings. First ledger: 56 items; full rendered block 5745 UTF-8 bytes.
+Model-reported cost $0.057333510; backfill+consolidation 194.600 seconds; command process 196.00
+seconds. Calls: 99 = 97 successful extractions + 1 invalid-JSON extraction retried by the
+implemented retry policy + 1 consolidation. That failed call is included in cost.
+
+Every remaining item judged one-off:
+1. 24: `watch CP MR !103 until it is merged.` — supervision of one merge request.
+2. 932: `yeah i approve that (chosen: Committing only if no claims owned by the selected tests are missing.)`
+3. 932: `yeah i approve that (chosen: Stopping and waiting if any run fails for a new reason.)`
+4. 932: `yeah i approve that (chosen: with no forced clicks and no retries.)`
+
+The three 932 items approve the particular oc-fullchain/oc-7 plan in reply 931; a wider policy
+is not explicit. These are human judgements, not proven intent. 126's `medium` IS a lasting
+choice: reply 125 asks which enduring Sol configuration to write for subsequently started agents.
+Stream A's roadmap and OIA requirements are ongoing-stream/product goals, not classified as
+single-action approvals. B/C tests verify prompt contracts; replay supplies semantic evidence.
+
+Latest full block, extraction records and acceptance table supersede the earlier scratch report
+at `/tmp/optchat-ledger-results.md`. Temporary script, profile and credential copies are removed
+before committing. No id-specific exclusions, push, merge, publish or install.
+

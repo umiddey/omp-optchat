@@ -7,6 +7,7 @@ import { projectContext } from '../src/integration.ts';
 import type { Entry } from '../src/memory.ts';
 import { cachePayload, splitView } from '../src/cache.ts';
 import { Memory } from '../src/memory.ts';
+import { EXTRACT_ORDERS, CONSOLIDATE_ORDERS } from '../src/prompts.ts';
 const entry = (i: number, text = 'Never push', kind: 'user' | 'talk' = 'user') => ({ i, text, kind, date: '2026-10-10', size: text.length });
 async function fixture(run: (o: Orders, dir: string) => Promise<void>, task: OrderTask = async (task) => task.kind === 'extract' ? ['Never push'] : [{ text: 'Never push', from: [0], date: '2026-10-10' }], entries: Entry[] = [], warn: (text: string) => void = () => {}) {
  const dir = mkdtempSync(join(tmpdir(), 'orders-test-')); const o = new Orders(dir, task, warn, 2, 10);
@@ -94,4 +95,43 @@ test('failed extraction retries on next message and persists exactly once with b
   active++; peak = Math.max(peak, active);
   try { if (task.entry.i === 0 && failures-- > 0) throw Error('transient'); await Promise.resolve(); return [task.entry.text]; } finally { active--; }
  }, [], () => failed.resolve());
+});
+
+test('A live extraction resolves lasting option from immediately preceding assistant reply, not later replies', async () => {
+ const choice = '"eclude and delete, yeah." (chosen: Exclude generated files from coverage and delete stale generated files.)';
+ await fixture(async o => {
+  o.append(entry(0, 'Exclude generated files from coverage and delete stale generated files.', 'talk'));
+  o.append(entry(1, 'eclude and delete, yeah.'));
+  o.append(entry(2, 'Unrelated later reply', 'talk'));
+  await o.extracted();
+  expect(o.records.get(1)?.orders).toEqual([choice]);
+ }, async input => input.kind === 'extract' && 'context' in input && input.context === 'Exclude generated files from coverage and delete stale generated files.' ? [choice] : []);
+});
+test('A backfill supplies nearest reply chunks capped to 4000 valid UTF-8 bytes, retaining their end', async () => {
+ let captured: unknown;
+ const text = 'prefix' + '界'.repeat(2000) + ' END chosen policy';
+ await fixture(async o => {
+  await o.settle();
+  expect(typeof captured).toBe('string');
+  if (typeof captured !== 'string') throw Error('Missing extraction context');
+  expect(Buffer.byteLength(captured)).toBeLessThanOrEqual(4000);
+  expect(captured.endsWith(' END chosen policy')).toBe(true);
+  expect(captured).not.toContain('prefix');
+  expect(captured).not.toContain('\uFFFD');
+ }, async input => { if (input.kind === 'extract') { captured = 'context' in input ? input.context : undefined; return []; } return []; },
+ [entry(0, 'older unrelated reply', 'talk'), entry(1, 'previous user question'), entry(2, text.slice(0, 3000), 'talk'), entry(3, text.slice(3000), 'talk'), entry(4, 'that option, yeah')]);
+});
+test('B extraction policy excludes task-scoped agent/deployment approvals while retaining ongoing conditional goals', () => {
+ expect(EXTRACT_ORDERS).toContain('keeps applying beyond the current task');
+ for (const example of ['use agent Y for this task', 'you may do number one', 'push this', 'install and restart']) expect(EXTRACT_ORDERS).toContain(example);
+ expect(EXTRACT_ORDERS).toContain('goals of an ongoing stream with conditions');
+ expect(EXTRACT_ORDERS).toContain('Context is for resolving references only');
+ expect(EXTRACT_ORDERS).toContain('never a source of orders by itself');
+});
+test('C consolidation forbids interpretation and only permits replacement/resolved-choice annotations', () => {
+ expect(CONSOLIDATE_ORDERS).toContain('Do not interpret');
+ expect(CONSOLIDATE_ORDERS).toContain('only allowed annotations');
+ expect(CONSOLIDATE_ORDERS).toContain('(replaces msg N)');
+ expect(CONSOLIDATE_ORDERS).toContain('(chosen:');
+ for (const forbidden of ['Possibly an exception', 'as written', 'unclear', 'typed']) expect(CONSOLIDATE_ORDERS).toContain(forbidden);
 });

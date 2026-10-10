@@ -83,6 +83,19 @@ is reused; failures retry with the compactor's ten-second availability policy. D
 are never appended. Backfill extracts missing historical ids on session start without blocking
 a normal turn, then creates the first ledger once; saved ledgers are never recomputed on restart.
 
+Extraction snapshots the immediately preceding assistant reply before queuing the user entry.
+Consecutive `talk` chunks are joined; at most the final 4000 UTF-8 bytes are kept, advancing the
+slice to a complete character boundary. Live logging and historical backfill use the same path;
+later replies cannot mutate queued extraction context. A user choice that sets a lasting
+goal/rule/policy may resolve its reference as `"user's words" (chosen: option text from reply)`.
+Context never supplies an order by itself. Task-scoped assignments, operations and deployment
+approvals remain excluded: standing orders apply beyond the current task.
+
+Consolidation must not interpret, speculate, normalize names or correct spelling. Its only
+allowed annotations are `(replaces msg N)` and the already-extracted `(chosen: ...)` text.
+These restrictions are prompt contracts; real-model replay measures compliance separately
+from deterministic context/persistence tests.
+
 Only a chat view merge batch publishes subsequent ledger changes. Its inclusive message point
 selects extraction records after `ledger.through`; the turn waits for extraction and consolidation
 at that boundary, like summary completion. New view and ledger are captured together for the
