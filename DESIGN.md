@@ -266,16 +266,22 @@ Facts from OMP 18.8.3 source:
   move that block to directly after the view blocks.
 - `extensions/runner.ts` 2022-2030: messages a `context` hook changes are marked per-call; OMP's own message
   marks avoid them. Irrelevant once we own all marks, but explains why OMP's default marks would miss the view.
+- OMP's `## MCP Server Instructions` lists `### <server>` blocks in connection order, which can change
+  between starts. `preparePrompt` sorts only those blocks by server name for active main OptChat sessions;
+  the section preamble, separator bytes and all surrounding text are unchanged. Plain/child prompts are untouched.
 
 Mark placement in `before_provider_request` (port pi-optchat `src/cache.ts`, change TTL handling):
 1. Find the view text block (starts with `<chat>\n`); split it into 4-line blocks counted from its start
    (`splitView`), byte-identical concatenation.
 2. Remove every existing `cache_control` (tools, system, messages). Place marks on the last system block (fallback
    entry: tools + system are stable for the session, so a turn whose view marks find nothing still reads them),
-   the view's last whole block and the block 20 before it (when it exists), plus one on the last cacheable block of
-   the request (skip thinking/redacted_thinking/empty text) — total ≤ 4. Without a system block the third view mark
-   (40 back) is used instead. Found live 2026-10-09: with view marks only, a new profile's first turns (view < 4
-   lines, no view mark) re-wrote the whole ~30k-token prefix every turn.
+   the view's last whole block and the previous provider request's last whole block (when its complete prefix
+   is byte-identical), plus one on the last cacheable block of the request (skip thinking/redacted_thinking/empty
+   text) — total ≤ 4. Each main profile atomically saves `cache.json` with `{viewBytes, sha256, blockIndex}`
+   for the marked UTF-8 prefix; a reopened process uses that hint only when the new prefix hash matches.
+   The exact old mark remains reachable after an arbitrarily large append. Missing/corrupt hints or a rewritten
+   prefix use the block 20 before the new last whole block instead. Hint read/write failures never stop a chat.
+   Without a system block retain the third view mark (40 back). Tiny views retain the tools + system fallback.
 3. Move the date/cwd reminder block after the view blocks (inside the same user message).
 4. Optional debug: when `OMP_OPTCHAT_DUMP_DIR` is set, write each final payload as
    `<dir>/<seq>-<agentKind>.json` (main only unless dumping children for the subagent check).

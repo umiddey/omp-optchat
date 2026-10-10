@@ -12,11 +12,13 @@ import { saveImages } from './images.ts';
 import { preparePrompt, projectContext, providerPayload, rawBytes, turnStart } from './integration.ts';
 import { registerMemoryTools } from './tools.ts';
 import { AgentIndex } from './agents.ts';
+import type { CacheState } from './cache.ts';
 
 export default function optchat(pi: ExtensionAPI) {
   pi.registerFlag('optchat', { type: 'string', description: 'Use a never-ending OptChat memory profile (main agent only)' });
   let memory: Memory | undefined, release: (() => Promise<void>) | undefined;
   let agents: AgentIndex | undefined;
+  const cache: CacheState = {};
   let fault: string | undefined;
   let run: AgentMessage[] = [], logged = 0, running = false;
   /** The run's first message as OMP holds it (asUser turns shown custom messages into user ones for the log). */
@@ -68,6 +70,7 @@ export default function optchat(pi: ExtensionAPI) {
       firstRun();
       const dir = profilePath(String(selected()));
       mkdirSync(dir, { recursive: true, mode: 0o700 });
+      cache.file = join(dir, 'cache.json');
       release = await lockProfile(dir, `OMP PID ${process.pid} (${ctx.cwd})`);
       const config = loadConfig(dir);
       runLimit = config.runLimit; recall = config.memories;
@@ -152,7 +155,7 @@ export default function optchat(pi: ExtensionAPI) {
     if (!active(ctx)) return;
     try {
       required();
-      const payload = providerPayload(event.payload, true, ctx.agent.kind, ctx.model?.api);
+      const payload = providerPayload(event.payload, true, ctx.agent.kind, ctx.model?.api, cache);
       const dir = process.env.OMP_OPTCHAT_DUMP_DIR;
       if (dir) { mkdirSync(dir, { recursive: true, mode: 0o700 }); writeFileSync(join(dir, `${String(++sequence).padStart(6, '0')}-${ctx.agent.kind}.json`), JSON.stringify(payload, null, 2), { mode: 0o600 }); }
       return payload;

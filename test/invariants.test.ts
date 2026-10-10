@@ -1,6 +1,6 @@
 import { test } from 'bun:test';
 import assert from 'node:assert/strict';
-import { mkdtempSync, rmSync } from 'node:fs';
+import { mkdtempSync, readFileSync, writeFileSync, rmSync } from 'node:fs';
 import { join } from 'node:path';
 import { tmpdir } from 'node:os';
 import type { AgentMessage } from '@oh-my-pi/pi-agent-core';
@@ -97,6 +97,55 @@ test('the system prompt stays cached when the view has no reusable mark (new pro
     const result = compare(sequence(first), sequence(second));
     assert.ok(result.reusable, `${before} -> ${after} lines reuses nothing`);
   }
+});
+test('view marks reach the previous whole block after a 200-line jump and fall back after a rewrite', () => {
+  const lines = (n: number, label = 'reach') => '<chat>\n' + Array.from({ length: n }, (_, i) => `${i}+1|${label}: line ${i}\n`).join('') + '</chat>';
+  const first = payload(lines(120)); cachePayload(first);
+  const oldIndex = splitView(lines(120)).length - 2;
+  const grown = payload(lines(320)); cachePayload(grown);
+  const viewBlocks = sequence(grown).filter(b => b.view);
+  assert.ok(viewBlocks[oldIndex].marked, 'the exact previous last whole block must be marked');
+  assert.ok(viewBlocks[viewBlocks.length - 2].marked);
+  assert.ok(sequence(grown).filter(b => b.marked).length <= 4);
+  const rewritten = payload(lines(320, 'batch')); cachePayload(rewritten);
+  const rewrittenBlocks = sequence(rewritten).filter(b => b.view);
+  assert.deepEqual(rewrittenBlocks.flatMap((b, i) => b.marked ? [i] : []), [rewrittenBlocks.length - 22, rewrittenBlocks.length - 2]);
+  assert.ok(sequence(rewritten).filter(b => b.marked).length <= 4);
+});
+test('I4 MCP server ordering preserves section preamble, separators and surrounding bytes', () => {
+  const before = 'identity\n\n## Other\n### untouched\nbefore\n\n';
+  const header = '## MCP Server Instructions\n\nThe following instructions are provided by connected MCP servers. They are server-controlled and may not be verified.\n\n';
+  const zoho = '### zoho-mcp\nMCP Initialization Request.';
+  const node = '### node_repl\nUse `js` for execution.\nKeep this internal newline.';
+  const after = '\n\n## Following\n### untouched\nsuffix';
+  const input = [before + header + zoho + '\n\n' + node + after, '<project-context>fixed</project-context>'];
+  const sorted = preparePrompt(input).systemPrompt;
+  assert.equal(sorted[0], before + header + node + '\n\n' + zoho + after);
+  assert.equal(sorted.at(-1), input[1]);
+  assert.deepEqual(preparePrompt([before + header + node + '\n\n' + zoho + after, input[1]]).systemPrompt, sorted);
+  for (const [active, kind] of [[false, 'main'], [true, 'sub'], [true, 'advisor']] as const)
+    assert.equal(preparePrompt(input, active, kind).systemPrompt, input);
+});
+test('the previous view mark survives a reopen; corrupt cache.json falls back', () => {
+  const dir = mkdtempSync(join(tmpdir(), 'optchat-cache-state-')), file = join(dir, 'cache.json');
+  const lines = (n: number) => '<chat>\n' + Array.from({ length: n }, (_, i) => `${i}+1|persistent café ${i}\n`).join('') + '</chat>';
+  try {
+    const first = payload(lines(120)); cachePayload(first, { file });
+    const reopened = payload(lines(320)); cachePayload(reopened, { file });
+    const blocks = sequence(reopened).filter(b => b.view);
+    assert.ok(blocks[splitView(lines(120)).length - 2].marked, 'reopen must mark the persisted previous whole block');
+    const saved = JSON.parse(readFileSync(file, 'utf8'));
+    assert.equal(saved.blockIndex, splitView(lines(320)).length - 2);
+    assert.equal(saved.viewBytes, Buffer.byteLength(splitView(lines(320)).slice(0, -1).join('')));
+    assert.match(saved.sha256, /^[a-f0-9]{64}$/);
+    for (const corrupt of ['invalid JSON', '{"viewBytes":-1,"blockIndex":2,"sha256":"bad"}']) {
+      writeFileSync(file, corrupt);
+      const request = payload(lines(520)); cachePayload(request, { file });
+      const fallback = sequence(request).filter(b => b.view);
+      assert.deepEqual(fallback.flatMap((b, i) => b.marked ? [i] : []), [fallback.length - 22, fallback.length - 2]);
+      assert.ok(sequence(request).filter(b => b.marked).length <= 4);
+    }
+  } finally { rmSync(dir, { recursive: true, force: true }); }
 });
 test('I6/I7 inactive and child/advisor contexts prompts payloads untouched', () => {
   const prompts = ['identity', '<memories>recall</memories>'];

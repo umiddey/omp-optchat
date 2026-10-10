@@ -1,4 +1,7 @@
 import { isView } from './memory.ts';
+import { createHash } from 'node:crypto';
+import { readFileSync } from 'node:fs';
+import { atomicWrite } from './store.ts';
 export function record(value: unknown): value is Record<string, unknown> {
   return typeof value === 'object' && value !== null && !Array.isArray(value);
 }
@@ -10,7 +13,10 @@ export function splitView(text: string) {
   pieces.push(text.slice(offset));
   return pieces;
 }
-export function cachePayload(payload: unknown): unknown {
+interface ViewMark { viewBytes: number; sha256: string; blockIndex: number }
+export interface CacheState { file?: string; previous?: ViewMark }
+const processState: CacheState = {};
+export function cachePayload(payload: unknown, state: CacheState = processState): unknown {
   if (!record(payload) || !Array.isArray(payload.messages)) return payload;
   const messages: unknown[] = payload.messages;
   for (const owner of messages) {
@@ -38,15 +44,40 @@ export function cachePayload(payload: unknown): unknown {
       content.splice(content.indexOf(blocks[blocks.length - 1]) + 1, 0, block);
     }
     if (!control) return payload;
-    // Fallback entry: tools + system never change in a session, so a turn whose view marks find nothing (a new
-    // profile's tiny view, a batch merge, a turn that adds more than 160 lines) still reads them from the cache.
+    // Fallback entry: tools + system remain readable when a tiny view or batch rewrite has no reusable mark.
     const system = Array.isArray(payload.system) ? payload.system.findLast(record) : undefined;
     if (system) system.cache_control = control;
-    // The view's last whole block and the one 20 back: Anthropic looks back 20 blocks from a mark, so together
-    // they find the last turn's entry after a turn adds up to 40 blocks (160 lines).
-    for (const back of system ? [0, 20] : [0, 20, 40]) {
-      const block = blocks[blocks.length - 2 - back];
+    const lastWhole = blocks.length - 2;
+    // Anchor the exact entry written by the previous request, regardless of how many lines were appended.
+    // Missing/corrupt state or a rewritten prefix retains Anthropic's 20-block lookback fallback.
+    if (!state.previous && state.file) {
+      try {
+        const saved: unknown = JSON.parse(readFileSync(state.file, 'utf8'));
+        if (record(saved) && Number.isSafeInteger(saved.viewBytes) && (saved.viewBytes as number) > 0
+          && Number.isSafeInteger(saved.blockIndex) && (saved.blockIndex as number) >= 0
+          && typeof saved.sha256 === 'string' && /^[a-f0-9]{64}$/.test(saved.sha256))
+          state.previous = saved as unknown as ViewMark;
+      } catch { /* Cache hints are disposable; never prevent a provider request. */ }
+    }
+    const bytes = Buffer.from(view.text);
+    const old = state.previous;
+    let oldPrefixBytes = 0;
+    if (old && old.blockIndex < lastWhole)
+      for (let i = 0; i <= old.blockIndex; i++) oldPrefixBytes += Buffer.byteLength(pieces[i]);
+    const previous = old && old.blockIndex < lastWhole && old.viewBytes === oldPrefixBytes
+      && createHash('sha256').update(bytes.subarray(0, old.viewBytes)).digest('hex') === old.sha256
+      ? old.blockIndex : lastWhole - 20;
+    for (const index of system ? [lastWhole, previous] : [lastWhole, previous, lastWhole - 40]) {
+      const block = blocks[index];
       if (block) block.cache_control = control;
+    }
+    const viewBytes = bytes.length - Buffer.byteLength(pieces[pieces.length - 1]);
+    state.previous = lastWhole >= 0
+      ? { viewBytes, sha256: createHash('sha256').update(bytes.subarray(0, viewBytes)).digest('hex'), blockIndex: lastWhole }
+      : undefined;
+    if (state.file) {
+      try { atomicWrite(state.file, JSON.stringify(state.previous ?? null)); }
+      catch { /* A failed hint write sacrifices reuse, not the chat. */ }
     }
     // Thinking signatures and empty text cannot carry Anthropic cache marks.
     for (let j = messages.length - 1; j >= 0; j--) {

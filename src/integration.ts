@@ -1,12 +1,26 @@
 import type { AgentMessage } from '@oh-my-pi/pi-agent-core';
 import { OPTCHAT_PROMPT } from './prompts.ts';
-import { cachePayload } from './cache.ts';
+import { cachePayload, type CacheState } from './cache.ts';
 export const NOTICES = new Set(['tool-roster-notice', 'eval-prelude-notice', 'session-agent-notice', 'xdev-mount-notice']);
 export const enabled = (active: boolean, kind: string) => active && kind === 'main';
+/** Only server order is unstable: preserve the preamble, bodies and separator bytes in their original slots. */
+function orderMcpInstructions(text: string): string {
+  return text.replace(/^## MCP Server Instructions\n[\s\S]*?(?=^#{1,2} |$(?![\s\S]))/gm, section => {
+    const headings = [...section.matchAll(/^### ([^\n]+)$/gm)];
+    if (headings.length < 2) return section;
+    const blocks = headings.map((heading, i) => {
+      const block = section.slice(heading.index, headings[i + 1]?.index ?? section.length);
+      const separator = block.match(/\n*$/)![0];
+      return { name: heading[1], text: block.slice(0, block.length - separator.length), separator };
+    });
+    const sorted = [...blocks].sort((a, b) => a.name < b.name ? -1 : a.name > b.name ? 1 : 0);
+    return section.slice(0, headings[0].index) + sorted.map((block, i) => block.text + blocks[i].separator).join('');
+  });
+}
 export function preparePrompt(systemPrompt: string[], active = true, kind = 'main') {
   if (!enabled(active, kind)) return { systemPrompt, memories: '' };
   const memories = systemPrompt.filter(s => s.startsWith('<memories>')).join('\n\n');
-  const stable = systemPrompt.filter(s => !s.startsWith('<memories>'));
+  const stable = systemPrompt.filter(s => !s.startsWith('<memories>')).map(orderMcpInstructions);
   const at = stable.findIndex(s => s.startsWith('<project-context>'));
   stable.splice(at < 0 ? stable.length : at, 0, OPTCHAT_PROMPT);
   return { systemPrompt: stable, memories };
@@ -49,6 +63,6 @@ export function rawBytes(messages: AgentMessage[], from: number): number {
   }
   return bytes;
 }
-export function providerPayload(payload: unknown, active: boolean, kind: string, api: string | undefined) {
-  return enabled(active, kind) && api === 'anthropic-messages' ? cachePayload(payload) : payload;
+export function providerPayload(payload: unknown, active: boolean, kind: string, api: string | undefined, cache?: CacheState) {
+  return enabled(active, kind) && api === 'anthropic-messages' ? cachePayload(payload, cache) : payload;
 }

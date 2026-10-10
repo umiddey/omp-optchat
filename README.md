@@ -10,6 +10,10 @@ Built so the prompt cache keeps working. Measured on real runs, every request af
 Anthropic Opus 97–99% of input read from cache, Codex `gpt-6.1-sol` 98.6%, GLM `glm-5.3-flash` 99% (after GLM
 stored the first request).
 
+Anthropic view marks remember the previous whole-view prefix across restarts in the profile's disposable
+`cache.json`, so large appends still reuse it. Missing/corrupt hints fall back safely; batch rewrites still
+write a new prefix. OptChat also stabilizes MCP server-instruction order between starts.
+
 ## Install
 
 ```sh
