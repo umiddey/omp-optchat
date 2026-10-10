@@ -371,3 +371,114 @@ test('consolidation failing after retries keeps pending and renders raw orders f
   await restored.close();
  }, async task => task.kind === 'extract' ? [task.entry.text] : (attempts++, Promise.reject(Error('offline'))));
 });
+
+test('E a restated item that drops a number or path is rejected and retried with the missing tokens named', async () => {
+ const source = 'Every endpoint must pass the PM gate with 0 waived and 0 baselined, see docs/gate.md.';
+ const retries: string[] = [];
+ await fixture(async o => {
+  o.append(entry(0, source)); await o.batch(0);
+  expect(retries).toHaveLength(2); expect(retries[0]).toBe('');
+  for (const token of ['"0"', '"waived"', '"baselined"', '"docs/gate.md"']) expect(retries[1]).toContain(token);
+  expect(o.ledger.items.map(item => item.text)).toEqual(['Every endpoint must pass the PM gate with 0 waived and 0 baselined; see docs/gate.md.']);
+ }, async task => {
+  if (task.kind === 'extract') return [{ text: task.entry.text, kind: 'rule' }];
+  retries.push(task.retry ?? '');
+  return [{ text: retries.length === 1 ? 'Every endpoint must pass the PM gate.' : 'Every endpoint must pass the PM gate with 0 waived and 0 baselined; see docs/gate.md.', kind: 'rule', from: [0], date: '2026-10-10' }];
+ });
+});
+test('E gatefoge typo fixed to Gateforge and one order spread over two messages pass as one merged item', async () => {
+ let consolidations = 0;
+ await fixture(async o => {
+  o.append(entry(0, 'gatefoge must never push without review.')); o.append(entry(1, 'Never push to main without review.'));
+  await o.batch(1);
+  expect(consolidations).toBe(1);
+  expect(o.ledger.items).toEqual([{ text: 'Gateforge must never push to main without review.', kind: 'rule', from: [0, 1], date: '2026-10-10' }]);
+  expect(o.render()).toContain('1 [rule] (2026-10-10): Gateforge must never push to main without review.');
+ }, async task => {
+  if (task.kind === 'extract') return [{ text: task.entry.text, kind: 'rule' }];
+  consolidations++;
+  return [{ text: 'Gateforge must never push to main without review.', kind: 'rule', from: [0, 1], date: '2026-10-10' }];
+ });
+});
+test('E after failed attempts only the failing order falls back to verbatim; the others keep restated wording', async () => {
+ let consolidations = 0; const warnings: string[] = [];
+ await fixture(async o => {
+  o.append(entry(0, 'Always verify claims before answering.')); o.append(entry(1, 'PM gate: 0 baselined, see docs/gate.md.')); o.append(entry(2, 'Never push to main.'));
+  await o.batch(2);
+  expect(consolidations).toBe(3);
+  expect(o.ledger.through).toBe(2);
+  const textOf = (id: number) => o.ledger.items.find(item => item.from.includes(id))?.text;
+  expect(textOf(0)).toBe('Always verify claims before answering anything.');
+  expect(textOf(1)).toBe('PM gate: 0 baselined, see docs/gate.md.');
+  expect(textOf(2)).toBe('Never push to main.');
+  expect(o.ledger.items).toHaveLength(3);
+  expect(warnings).toHaveLength(1);
+ }, async task => {
+  if (task.kind === 'extract') return [{ text: task.entry.text, kind: 'rule' }];
+  consolidations++;
+  return [
+   { text: 'Always verify claims before answering anything.', kind: 'rule', from: [0], date: '2026-10-10' },
+   { text: 'PM gate must stay clean.', kind: 'rule', from: [1], date: '2026-10-10' },
+   { text: 'Never push to main.', kind: 'rule', from: [2], date: '2026-10-10' },
+  ];
+ }, [], text => warnings.push(text));
+});
+test('E an order whose ids are covered but whose number changed (663 to 661) fails the guard', async () => {
+ let consolidations = 0; const retries: string[] = []; const warnings: string[] = [];
+ await fixture(async o => {
+  o.append(entry(0, 'Keep the PM gate at 663 tests green.')); await o.batch(0);
+  expect(consolidations).toBe(3);
+  expect(retries[1]).toContain('"663"');
+  expect(o.render()).toContain('0 [rule] (2026-10-10): Keep the PM gate at 663 tests green.');
+  expect(o.render()).not.toContain('661');
+  expect(warnings).toHaveLength(1);
+ }, async task => {
+  if (task.kind === 'extract') return [{ text: task.entry.text, kind: 'rule' }];
+  consolidations++; retries.push(task.retry ?? '');
+  return [{ text: 'Keep the PM gate at 661 tests green.', kind: 'rule', from: [0], date: '2026-10-10' }];
+ }, [], text => warnings.push(text));
+});
+test('E a newly extracted order the consolidation omits is appended verbatim after its retries instead of silently dropped', async () => {
+ let consolidations = 0;
+ await fixture(async o => {
+  o.append(entry(0, 'Always verify claims.')); o.append(entry(1, 'Never push to main.'));
+  await o.batch(1);
+  expect(consolidations).toBe(3);
+  expect(o.render()).toContain('1 [rule] (2026-10-10): Never push to main.');
+ }, async task => {
+  if (task.kind === 'extract') return [{ text: task.entry.text, kind: 'rule' }];
+  consolidations++;
+  return [{ text: 'Always verify claims.', kind: 'rule', from: [0], date: '2026-10-10' }];
+ });
+});
+test('E an order retired later in the same batch is not required in the consolidation', async () => {
+ let consolidations = 0;
+ await fixture(async o => {
+  o.append(entry(0, 'Watch CP MR !103 until merged.')); o.append(entry(1, 'Drop the CP MR !103 watch.'));
+  await o.batch(1);
+  expect(consolidations).toBe(1);
+  expect(o.ledger.items).toEqual([]);
+ }, async task => {
+  if (task.kind === 'extract') return task.entry.i === 0 ? [{ text: task.entry.text, kind: 'rule' }] : [{ retire: [0] }];
+  consolidations++;
+  return [];
+ });
+});
+test('E a previous order replaced by a newer user message needs no restated tokens of its own', async () => {
+ const dir = mkdtempSync(join(tmpdir(), 'orders-replace-'));
+ writeFileSync(join(dir, 'ledger.json'), JSON.stringify({ through: 0, items: [{ text: 'Watch CP MR !103 until merged.', kind: 'rule', from: [0], date: '2026-10-10' }] }));
+ writeFileSync(join(dir, 'orders.jsonl'), JSON.stringify({ i: 1, date: '2026-10-10', orders: ['Stop watching CP MR !103 from now on.'] }) + '\n');
+ const o = new Orders(dir, async () => [{ text: 'Stop watching CP MR !103 from now on. (replaces msg 0)', kind: 'rule', from: [1], date: '2026-10-10' }], () => {});
+ try { await o.batch(1); expect(o.ledger.items).toEqual([{ text: 'Stop watching CP MR !103 from now on. (replaces msg 0)', kind: 'rule', from: [1], date: '2026-10-10' }]); } finally { await o.close(); rmSync(dir, { recursive: true, force: true }); }
+});
+test('E consolidation restates orders in clear wording, fixes typos and names, and keeps every condition', () => {
+ expect(CONSOLIDATE_ORDERS).toContain('Restate each order');
+ expect(CONSOLIDATE_ORDERS).toContain('Fix typos and names');
+ expect(CONSOLIDATE_ORDERS).toContain('Keep every condition, number, name, path, id and quantifier');
+ expect(CONSOLIDATE_ORDERS).not.toContain('correct spelling, normalize names');
+});
+test('E turn prompt says orders are restated and zoom(id, 1) shows the exact words', () => {
+ expect(OPTCHAT_PROMPT).toContain('restated in clear wording');
+ expect(OPTCHAT_PROMPT).toContain("zoom(id, 1) shows the user's exact words");
+ expect(OPTCHAT_PROMPT).toContain('check the original with zoom(id, 1) before acting');
+});
