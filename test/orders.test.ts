@@ -388,7 +388,7 @@ test('E a restated item that drops a number or path is rejected and retried with
  await fixture(async o => {
   o.append(entry(0, source)); await o.batch(0);
   expect(retries).toHaveLength(2); expect(retries[0]).toBe('');
-  for (const token of ['"0"', '"waived"', '"baselined"', '"docs/gate.md"']) expect(retries[1]).toContain(token);
+  for (const token of ['"0"', '"docs/gate.md"']) expect(retries[1]).toContain(token);
   expect(o.ledger.items.map(item => item.text)).toEqual(['Every endpoint must pass the PM gate with 0 waived and 0 baselined; see docs/gate.md.']);
  }, async task => {
   if (task.kind === 'extract') return [{ text: task.entry.text, kind: 'rule' }];

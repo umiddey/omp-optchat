@@ -622,11 +622,9 @@ live profile was never touched.
 CONSOLIDATE now restates orders in clear wording, merges an order spread over messages into one item
 and fixes typos and names, keeping every condition. Code guard (`missingTokens` in `src/orders.ts`)
 checks every previous and newly extracted order: a covering item of the same kind must share a source
-id and keep its must-keep tokens (numbers, paths, URLs, ids, code-ish tokens, condition words, names of
-5+ letters within edit distance 2). Gaps retry with the missing tokens listed (attempts 0 and 1); the
+id and keep its must-keep tokens (numbers, paths, URLs, ids, code-ish tokens, condition words, all-caps acronyms, and capitalised names not starting a sentence; names of 5+ letters within edit distance 2; plain lowercase words not must-keep). Gaps retry with the missing tokens listed (attempts 0 and 1); the
 last attempt substitutes the verbatim text for only the failing orders, with one warning. Hard error
-only when an active previous order is omitted. Text retire targets now match word by word, so a
-retired order stays retired after restating (needed by the BANANA regression tests). EXTRACT unchanged.
+only when an active previous order is omitted. Text retire targets match content words only (3+ letters or all-caps acronyms, minus the/and/for/with/that/this/rule/order/goal), so a phrase retires only the items carrying all its content words; a phrase with none retires nothing. A retired order stays retired after restating (needed by the BANANA regression tests). EXTRACT unchanged.
 `HANDOFF-ledger.md` removed. Tests: 131 pass, 0 fail, 15 files; `bunx tsc --noEmit` exit 0.
 Two existing tests were updated, not weakened: `test/recipe.test.ts` pins the new `OPTCHAT_PROMPT`
 tail, and the byte-bound fixture in `test/orders.test.ts` now keeps the condition word "Never push" so

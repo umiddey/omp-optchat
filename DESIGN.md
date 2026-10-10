@@ -96,8 +96,8 @@ over several messages into one item and fixing typos and names (`gatefoge` → `
 interpret, speculate or add commentary; its only allowed annotations are `(replaces msg N)` and the
 already-extracted `(chosen: ...)` text. Restating never drops a condition: code checks that every
 previous and newly extracted order is covered by an item of its kind sharing one of its source ids,
-keeping its must-keep tokens (numbers, paths, URLs, ids, code-ish tokens, condition words, and names of
-five or more letters within edit distance 2). A gap retries with the missing tokens listed; after the
+keeping its must-keep tokens (numbers, paths, URLs, ids, code-ish tokens, condition words, all-caps
+acronyms, and capitalised names that do not start a sentence; names of five or more letters within edit distance 2; plain lowercase words are not must-keep). A gap retries with the missing tokens listed; after the
 last attempt only the failing order falls back to its verbatim text, with one warning. `zoom(id, 1)`
 shows the user's exact words. Prompt contracts are measured by real-model replay; the guard is code.
 

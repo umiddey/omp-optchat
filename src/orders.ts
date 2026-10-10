@@ -32,17 +32,19 @@ function directives(value: unknown): OrderDirective[] {
  if (!Array.isArray(value)) throw Error('Orders extraction must return an array.');
  return value.map((v: unknown) => typeof v === 'object' && v && 'retire' in v ? { retire: retireTargets(v.retire) } : standing(v));
 }
-/** A text retire target retires an order when each of its words appears in the order's text, in any order. */
+const RETIRE_STOPWORDS: Record<string, true> = { the: true, and: true, for: true, with: true, that: true, this: true, rule: true, order: true, goal: true };
+/** A text retire target retires an order when every content word of the phrase appears in the order's text, in any order. Content words are those of 3+ letters or all-caps acronyms, minus RETIRE_STOPWORDS; a phrase with none retires nothing. */
 function mentions(text: string, phrase: string) {
  const words = new Set(text.toLowerCase().match(/\p{L}+/gu) ?? []);
- return (phrase.toLowerCase().match(/\p{L}+/gu) ?? []).every(word => words.has(word));
+ const content = (phrase.match(/\p{L}+/gu) ?? []).filter(run => (run.length >= 3 || (run.length >= 2 && run === run.toUpperCase())) && RETIRE_STOPWORDS[run.toLowerCase()] !== true);
+ return content.length > 0 && content.every(word => words.has(word.toLowerCase()));
 }
 function retired(item: OrderItem, events: readonly RetirementEvent[]) {
  return events.some(event => Math.max(...item.from) <= event.i && event.retire.some(target =>
   typeof target === 'number' ? item.from.includes(target) : mentions(item.text, target)));
 }
 const CONDITIONS: Record<string, true> = { every: true, each: true, all: true, any: true, never: true, always: true, only: true, until: true, unless: true, except: true, before: true, after: true, must: true, without: true };
-/** Must-keep token of a source order: numbers, paths, URLs, ids and code-ish tokens match exactly; condition words match whole words; names of 5+ letters tolerate edit distance 2. */
+/** Must-keep token of a source order: numbers, paths, URLs, ids and code-ish tokens match exactly; condition words and all-caps acronyms match whole words, case-insensitively; a capitalised word that does not start a sentence is a name (5+ letters tolerate edit distance 2). Plain lowercase words are never must-keep. */
 interface Keep { text: string; match: 'exact' | 'word' | 'name' }
 function distance(a: string, b: string) {
  let row = Array.from({ length: b.length + 1 }, (_, j) => j);
@@ -53,21 +55,24 @@ function distance(a: string, b: string) {
  }
  return row[b.length];
 }
-function classify(token: string): Keep[] {
+function classify(token: string, start: boolean): Keep[] {
  if (!/[\p{L}\d]/u.test(token)) return [];
- if (token.includes('/') && !/[.:~]|^\//.test(token)) return token.split('/').flatMap(classify);
+ if (token.includes('/') && !/[.:~]|^\//.test(token)) return token.split('/').flatMap((piece, index) => classify(piece, start && index === 0));
  if (/[._:\/\-\d]/.test(token)) return [{ text: token, match: 'exact' }];
  const found: Keep[] = [];
  for (const run of token.match(/\p{L}+/gu) ?? []) {
-  if (CONDITIONS[run.toLowerCase()] === true) found.push({ text: run, match: 'word' });
-  else if (run.length >= 5) found.push({ text: run, match: 'name' });
+  const acronym = run.length >= 2 && run === run.toUpperCase() && /\p{Lu}/u.test(run);
+  if (CONDITIONS[run.toLowerCase()] === true || acronym) found.push({ text: run, match: 'word' });
+  else if (!start && /\p{Lu}/u.test(run)) found.push({ text: run, match: run.length >= 5 ? 'name' : 'word' });
  }
  return found;
 }
 function keeps(source: string): Keep[] {
- return source.split(/\s+/).flatMap((raw): Keep[] => {
+ const raws = source.split(/\s+/);
+ return raws.flatMap((raw, index): Keep[] => {
   const token = raw.replace(/^[`"'(\[{*]+|[`"')\]}.,;:!?*]+$/g, '');
-  return raw.includes('`') && /[\p{L}\d]/u.test(token) ? [{ text: token, match: 'exact' }] : classify(token);
+  const start = index === 0 || /[.!?]["')\]]*$/.test(raws[index - 1]);
+  return raw.includes('`') && /[\p{L}\d]/u.test(token) ? [{ text: token, match: 'exact' }] : classify(token, start);
  });
 }
 function holds(keep: Keep, restated: string, words: readonly string[]) {
