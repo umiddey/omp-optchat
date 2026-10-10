@@ -102,10 +102,10 @@ missing ids once in the background, batched; their first ledger appears at a sub
 completion. Normal turns do not wait for scanning; a view rewrite waits for its consolidation with the
 usual working message.
 
-Profiles written before restated orders included `said` migrate once in the background. Clean extractions
-are appended as superseding records, never by rewriting history; the rendered ledger changes only at the
-next normal view batch. Duplicate orders merge with their source ids, and newer incompatible orders replace
-older ones without treating apparent completion as retirement.
+Older profiles migrate their current standing-orders ledger once in the background, using source messages
+only to resolve wording. Historical orders already replaced or retired are never extracted again.
+`orders.jsonl` stays untouched; the ledger changes only at the next normal view batch and saves a
+`migrationDone` marker. Explicit item-index coverage prevents silent drops; a failing item stays verbatim.
 
 Standing means an instruction keeps applying beyond the current task. One-off agent assignments,
 action approvals, pushing a particular change, or installing/restarting it are not standing orders.

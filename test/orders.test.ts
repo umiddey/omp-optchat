@@ -123,139 +123,6 @@ test('D legacy string records load as rules without rewriting history', async ()
  writeFileSync(file, text); const o = new Orders(dir, consolidate);
  try { expect(o.records.get(0)?.orders).toEqual([{ said: 'Never push', text: 'Never push', kind: 'rule' }]); expect(readFileSync(file, 'utf8')).toBe(text); } finally { await o.close(); rmSync(dir, { recursive: true, force: true }); }
 });
-test('one superseding record loads and wins; a second superseding record is rejected', async () => {
- const dir = mkdtempSync(join(tmpdir(), 'orders-supersede-')), file = join(dir, 'orders.jsonl');
- const original = { i: 0, date: '2026-10-10', orders: [{ text: 'push when green please', kind: 'rule' }] };
- const replacement = { i: 0, date: '2026-10-10', orders: [{ said: 'push when green please', text: 'Push when green.', kind: 'rule' as const }], supersedes: true };
- writeFileSync(file, [original, replacement].map(r => JSON.stringify(r)).join('\n') + '\n');
- let o: Orders | undefined;
- try {
-  expect(() => { o = new Orders(dir, consolidate); }).not.toThrow();
-  expect(o!.records.get(0)?.orders).toEqual(replacement.orders);
-  await o!.close(); o = undefined;
-  writeFileSync(file, JSON.stringify(replacement) + '\n', { flag: 'a' });
-  expect(() => new Orders(dir, consolidate)).toThrow('duplicate orders');
- } finally { await o?.close(); rmSync(dir, { recursive: true, force: true }); }
-});
-test('legacy migration runs once in bounded backfill and changes the ledger only at the next batch', async () => {
- const dir = mkdtempSync(join(tmpdir(), 'orders-migrate-')), file = join(dir, 'orders.jsonl');
- const original = { i: 1, date: '2026-10-10', orders: [{ text: 'push when green please', kind: 'rule' as const }] };
- const oldLedger = { through: 3, items: [{ text: 'push when green please', kind: 'rule', from: [1], date: '2026-10-10' }] };
- writeFileSync(file, JSON.stringify(original) + '\n'); writeFileSync(join(dir, 'ledger.json'), JSON.stringify(oldLedger));
- const history = [entry(0, 'a'.repeat(3000), 'talk'), entry(1, 'push when green please'), entry(2, 'b'.repeat(3000), 'talk'), entry(3, 'other', 'talk')];
- let scans = 0, batches = 0, o: Orders | undefined;
- const task: OrderTask = async input => {
-  if (input.kind === 'backfill') {
-   scans++; expect(input.items.length).toBeLessThanOrEqual(20);
-   expect(input.items[0]).toEqual({ i: 1, text: 'push when green please', before: 'a'.repeat(2048), after: 'b'.repeat(2048), previous: original.orders });
-   return { 1: [{ said: 'push when green please', text: 'Push when green.', kind: 'rule' }] };
-  }
-  batches++; expect(input.ledger.items).toEqual([]);
-  return consolidate(input, new AbortController().signal);
- };
- try {
-  o = new Orders(dir, task); const before = o.render(); o.backfill(history, () => false); await o.drain();
-  expect(scans).toBe(1); expect(batches).toBe(0); expect(o.render()).toBe(before);
-  expect(readFileSync(file, 'utf8').startsWith(JSON.stringify(original) + '\n')).toBe(true);
-  expect(JSON.parse(readFileSync(file, 'utf8').trim().split('\n')[1]).supersedes).toBe(true);
-  await o.close(); o = new Orders(dir, task); o.backfill(history, () => false); await o.drain();
-  expect(scans).toBe(1); expect(o.render()).toBe(before);
-  await o.batch(4); expect(o.render()).toContain('Push when green.'); expect(o.render()).not.toContain('please');
-  expect(batches).toBe(1);
-  await o.close(); o = new Orders(dir, task); o.backfill(history, () => false); await o.drain(); await o.settle();
-  expect(scans).toBe(1); expect(batches).toBe(1); expect(o.render()).toContain('Push when green.');
- } finally { await o?.close(); rmSync(dir, { recursive: true, force: true }); }
-});
-test('legacy backfill batches at 20, bounds UTF-8 talk context, and guards every restatement', async () => {
- const dir = mkdtempSync(join(tmpdir(), 'orders-migrate-bounded-'));
- const records = Array.from({ length: 22 }, (_, i) => ({ i: i + 1, date: '2026-10-10', orders: [{ text: 'Never push with 0 waived.', kind: 'rule' }] }));
- writeFileSync(join(dir, 'orders.jsonl'), records.map(r => JSON.stringify(r)).join('\n') + '\n');
- writeFileSync(join(dir, 'ledger.json'), JSON.stringify({ through: 23, items: [] }));
- const batches: number[] = [];
- const contexts: string[] = [];
- const o = new Orders(dir, async input => {
-  if (input.kind !== 'backfill') throw Error('No consolidation outside a view batch');
-  batches.push(input.items.length);
-  for (const item of input.items) {
-   contexts.push(item.before!, item.after!);
-  }
-  return Object.fromEntries(input.items.map(item => [item.i, [{ said: item.text, text: 'Push.', kind: 'rule' }]]));
- });
- try {
-  o.backfill([entry(0, '界'.repeat(2000), 'talk'), ...records.map(r => entry(r.i, 'Never push with 0 waived.')), entry(23, '界'.repeat(2000), 'talk')], () => false);
-  await o.drain();
-  expect(batches).toEqual([20, 2]);
-  for (const context of contexts) {
-   expect(Buffer.byteLength(context)).toBeLessThanOrEqual(2048);
-   expect(context).not.toContain('\uFFFD');
-  }
-  for (const record of o.records.values()) expect(record.orders).toEqual([{ said: 'Never push with 0 waived.', text: 'Never push with 0 waived.', kind: 'rule' }]);
- } finally { await o.close(); rmSync(dir, { recursive: true, force: true }); }
-});
-test('a next-batch migrated actor prohibition replaces the incompatible goal and merges duplicate source ids', async () => {
- const dir = mkdtempSync(join(tmpdir(), 'orders-migrate-conflict-'));
- const records = [
-  { i: 0, date: '2026-10-10', orders: [{ text: 'AgentA should raise merge requests.', kind: 'goal' }] },
-  { i: 1, date: '2026-10-10', orders: [{ text: 'AgentA must never raise merge requests; AgentB should do it.', kind: 'rule' }] },
-  { i: 2, date: '2026-10-10', orders: [{ text: 'Always review code.', kind: 'rule' }] },
-  { i: 3, date: '2026-10-10', orders: [{ text: 'Always review code.', kind: 'rule' }] },
- ];
- writeFileSync(join(dir, 'orders.jsonl'), records.map(r => JSON.stringify(r)).join('\n') + '\n');
- writeFileSync(join(dir, 'ledger.json'), JSON.stringify({ through: 3, items: records.flatMap(r => r.orders.map(order => ({ ...order, from: [r.i], date: r.date }))) }));
- const o = new Orders(dir, async input => input.kind === 'backfill'
-  ? Object.fromEntries(input.items.map(item => [item.i, records[item.i].orders.map(order => ({ ...order, said: order.text }))]))
-  : [
-   { ...records[1].orders[0], text: records[1].orders[0].text + ' (replaces msg 0)', from: [1], date: records[1].date },
-   { ...records[2].orders[0], from: [2, 3], date: records[3].date },
-  ]);
- try {
-  o.backfill(records.map(r => entry(r.i, r.orders[0].text)), () => false); await o.drain(); await o.batch(4);
-  expect(o.ledger.items).toHaveLength(2);
-  expect(o.ledger.items.some(item => item.from.includes(0))).toBe(false);
-  expect(o.ledger.items[0].text).toContain('(replaces msg 0)');
-  expect(o.ledger.items[1].from).toEqual([2, 3]);
- } finally { await o.close(); rmSync(dir, { recursive: true, force: true }); }
-});
-test('migration preserves a finite goal done-condition while recovering its conditional permission', async () => {
- const dir = mkdtempSync(join(tmpdir(), 'orders-migrate-until-'));
- writeFileSync(join(dir, 'orders.jsonl'), JSON.stringify({ i: 0, date: '2026-10-10', orders: [{ text: 'ensure we fix them eventually', kind: 'goal', until: 'the 1858 gate entries are fixed' }] }) + '\n');
- const warnings: string[] = [], o = new Orders(dir, consolidate, warning => warnings.push(warning));
- try {
-  o.recordAll(new Map([[0, [{ said: 'okay to push with no verify but ensure we fix them eventually', text: 'Push with no verify is permitted provided the gaps are eventually fixed.', kind: 'rule' }]]]));
-  expect(o.records.get(0)?.orders).toEqual([{ said: 'okay to push with no verify but ensure we fix them eventually', text: 'Push with no verify is permitted provided the gaps are eventually fixed.', kind: 'goal', until: 'the 1858 gate entries are fixed' }]);
-  expect(warnings).toHaveLength(1);
- } finally { await o.close(); rmSync(dir, { recursive: true, force: true }); }
-});
-test('migration cannot silently omit an old order when another order shares its message id', async () => {
- const dir = mkdtempSync(join(tmpdir(), 'orders-migrate-coverage-'));
- const old = [
-  { text: 'Read every file in Where the rules live; work by /home/ukd/.omp/agent/AGENTS.md and ORCHESTRATOR_PLAYBOOK.md.', kind: 'rule' as const },
-  { text: 'The disk is the truth, not the handover text.', kind: 'rule' as const },
- ];
- writeFileSync(join(dir, 'orders.jsonl'), JSON.stringify({ i: 24, date: '2026-10-10', orders: old }) + '\n');
- const warnings: string[] = [], o = new Orders(dir, consolidate, warning => warnings.push(warning));
- try {
-  o.recordAll(new Map([[24, [{ said: 'Do not run a Gateforge full suite.', text: 'Do not run a Gateforge full suite.', kind: 'rule' }]]]));
-  for (const order of old) expect(o.records.get(24)?.orders).toContainEqual({ ...order, said: order.text });
-  expect(warnings).toHaveLength(2);
- } finally { await o.close(); rmSync(dir, { recursive: true, force: true }); }
-});
-test('consolidation requires per-item content coverage, not an unrelated same-id item', async () => {
- const dir = mkdtempSync(join(tmpdir(), 'orders-item-coverage-'));
- const old = { text: 'The disk is the truth, not the handover text.', kind: 'rule' as const, from: [24], date: '2026-10-10' };
- writeFileSync(join(dir, 'ledger.json'), JSON.stringify({ through: 24, items: [old] }));
- let calls = 0; const warnings: string[] = [], retries: string[] = [];
- const o = new Orders(dir, async input => { calls++; if (input.kind === 'consolidate' && input.retry) retries.push(input.retry); return [{ ...old, text: 'Do not run a Gateforge full suite.' }]; }, warning => warnings.push(warning));
- try {
-  await o.batch(25);
-  expect(o.ledger.items).toContainEqual(old);
-  expect(calls).toBe(3); expect(warnings).toHaveLength(1);
-  for (const retry of retries) {
-   for (const word of ['disk', 'truth', 'handover', 'text']) expect(retry).toContain(`"${word}"`);
-   expect(retry).not.toContain('content coverage');
-  }
- } finally { await o.close(); rmSync(dir, { recursive: true, force: true }); }
-});
 test('consolidation carries a completely omitted active order into the published fallback', async () => {
  const dir = mkdtempSync(join(tmpdir(), 'orders-item-omitted-'));
  const old = { text: 'The disk is the truth, not the handover text.', kind: 'rule' as const, from: [24], date: '2026-10-10' };
@@ -594,7 +461,7 @@ test('E a previous order replaced by a newer user message needs no restated toke
  const dir = mkdtempSync(join(tmpdir(), 'orders-replace-'));
  writeFileSync(join(dir, 'ledger.json'), JSON.stringify({ through: 0, items: [{ text: 'Watch CP MR !103 until merged.', kind: 'rule', from: [0], date: '2026-10-10' }] }));
  writeFileSync(join(dir, 'orders.jsonl'), JSON.stringify({ i: 1, date: '2026-10-10', orders: ['Stop watching CP MR !103 from now on.'] }) + '\n');
- const o = new Orders(dir, async () => [{ text: 'Stop watching CP MR !103 from now on. (replaces msg 0)', kind: 'rule', from: [1], date: '2026-10-10' }], () => {});
+ const o = new Orders(dir, async () => [{ text: 'Stop watching CP MR !103 from now on. (replaces msg 0)', kind: 'rule', from: [1], date: '2026-10-10', covers: [0] }], () => {});
  try { await o.batch(1); expect(o.ledger.items).toEqual([{ text: 'Stop watching CP MR !103 from now on. (replaces msg 0)', kind: 'rule', from: [1], date: '2026-10-10' }]); } finally { await o.close(); rmSync(dir, { recursive: true, force: true }); }
 });
 test('E consolidation restates orders in clear wording, fixes typos and names, and keeps every condition', () => {

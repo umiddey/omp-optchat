@@ -21,6 +21,11 @@ describe('must-keep condition words and negation', () => {
   test('a condition word still must be kept', () => {
     expect(missingTokens('every repo gets it', 'some repos get it')).toEqual(['every']);
   });
+  test('dropping either negation fails the hard-token guard', () => {
+    expect(missingTokens('do not push', 'push')).toEqual(['not']);
+    expect(missingTokens('no waivers', 'waivers')).toEqual(['no']);
+    expect(missingTokens("don't push", 'push')).toEqual(['not']);
+  });
 });
 
 describe('shouted words are not acronyms', () => {

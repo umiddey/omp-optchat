@@ -16,10 +16,12 @@ export interface ExtractedOrders { i: number; date: string; orders: OrderDirecti
 export interface OrderItem extends StandingOrder { from: number[]; date: string }
 export interface Ledger { through: number; items: OrderItem[] }
 /** A history message for the one-time backfill, with the assistant's talk before and after it for references. */
-export interface BackfillItem { i: number; text: string; before?: string; after?: string; previous?: OrderDirective[] }
+export interface BackfillItem { i: number; text: string; before?: string; after?: string }
+export interface MigrationItem extends OrderItem { index: number; sources: { i: number; said: string; before?: string; after?: string }[] }
 export type OrderInput =
  | { kind: 'consolidate'; ledger: Ledger; records: ExtractedOrders[]; through: number; retry?: string }
- | { kind: 'backfill'; items: BackfillItem[] };
+ | { kind: 'backfill'; items: BackfillItem[] }
+ | { kind: 'migrate'; items: MigrationItem[] };
 export type OrderTask = (input: OrderInput, signal: AbortSignal) => Promise<unknown>;
 const eligible = (entry: Entry) => entry.kind === 'user' && !/^\[[^\]\r\n]+\] /.test(entry.text);
 function standing(value: unknown): StandingOrder {
@@ -64,7 +66,7 @@ function retired(item: OrderItem, events: readonly RetirementEvent[]) {
  return events.some(event => Math.max(...item.from) <= event.i && event.retire.some(target =>
   typeof target === 'number' ? item.from.includes(target) : mentions(item.text, target)));
 }
-const CONDITIONS: Record<string, true> = { every: true, each: true, all: true, never: true, always: true, only: true, until: true, unless: true, except: true, before: true, after: true, must: true, without: true };
+const CONDITIONS: Record<string, true> = { every: true, each: true, all: true, never: true, always: true, only: true, until: true, unless: true, except: true, before: true, after: true, must: true, without: true, not: true, no: true };
 /** Common words that are shouted in dictation (YOU HAVE TO), not acronyms. */
 const SHOUTED: Record<string, true> = { you: true, have: true, to: true, the: true, and: true, for: true, not: true, are: true, this: true, that: true, with: true, from: true, but: true, it: true, is: true, be: true, so: true, my: true, me: true, we: true, he: true, she: true, do: true, on: true, in: true, of: true, at: true, by: true, or: true, as: true, an: true, if: true, go: true, get: true, out: true, up: true, our: true, your: true, they: true, them: true, their: true, what: true, when: true, who: true, fucking: true, ever: true, point: true };
 /** Interjections and fillers that dictation capitalises mid-sentence; they are not names. */
@@ -96,6 +98,7 @@ function keeps(source: string): Keep[] {
  const raws = source.split(/\s+/);
  return raws.flatMap((raw, index): Keep[] => {
   const token = raw.replace(/^[`"'(\[{*]+|[`"')\]}.,;:!?*]+$/g, '');
+  if (/n['’]t$/i.test(token)) return [{ text: 'not', match: 'word' }];
   // "and all that" is trailing dictation filler, not a quantified obligation.
   if (token.toLowerCase() === 'all' && /^that\b/i.test(raws[index + 1] ?? '') && /^and$/i.test(raws[index - 1] ?? '')) return [];
   const start = index === 0 || /[.!?]["')\]]*$/.test(raws[index - 1]);
@@ -105,6 +108,10 @@ function keeps(source: string): Keep[] {
 function holds(keep: Keep, restated: string, words: readonly string[]) {
  if (keep.match === 'exact') return new RegExp(`(?<![\\p{L}\\d])${keep.text.replace(/[.*+?^${}()|[\]\\\/]/g, '\\$&')}(?![\\p{L}\\d])`, 'u').test(restated);
  const word = keep.text.toLowerCase();
+ if (keep.match === 'word' && word === 'not')
+  return words.some(word => word === 'not' || word === 'never' || word === 'no') || /\b\p{L}+n['’]t\b/u.test(restated);
+ if (keep.match === 'word' && word === 'no')
+  return words.some(word => word === 'no' || word === 'zero' || word === 'none' || word === 'without') || /\b0\b/.test(restated);
  return keep.match === 'word' ? words.includes(word) || (keep.text === keep.text.toUpperCase() && words.includes(word + 's'))
   : words.some(v => v === word || distance(v, word) <= 2);
 }
@@ -119,27 +126,13 @@ export function missingTokens(source: string, restated: string, context = ''): s
  return unmet.filter(keep => { if (keep.match !== 'name' || spare.length === 0) return true; spare.shift(); return false; }).map(keep => keep.text);
 }
 const wording = (order: StandingOrder) => [order.text, order.until].filter(Boolean).join(' ');
-const CONTENT_STOPWORDS: Record<string, true> = {
- that: true, this: true, with: true, have: true, them: true, they: true, their: true, there: true,
- from: true, when: true, then: true, your: true, should: true, would: true, could: true, will: true,
- been: true, being: true, into: true, does: true, also: true, every: true, only: true, must: true,
-};
-/** One restatement must retain both hard tokens and at least half of this order's distinct content words. */
-function missingCoverage(source: string, restated: string): string[] {
- const missing = missingTokens(source, restated);
- const content = [...new Set((source.toLowerCase().match(/\p{L}{4,}/gu) ?? []).filter(word => !CONTENT_STOPWORDS[word]))];
- const words = restated.toLowerCase().match(/\p{L}+/gu) ?? [];
- const unmatched = content.filter(word => !words.some(candidate => candidate === word || distance(word, candidate) <= 1));
- if ((content.length - unmatched.length) * 2 < content.length) missing.push(...unmatched);
- return [...new Set(missing)];
-}
 interface Gap { source: OrderItem; omitted: boolean; missing: string[] }
-/** Each needed order needs one same-kind/shared-id item retaining hard tokens and its own content coverage. */
+/** Newly extracted orders retain hard-token coverage; existing ledger items use explicit index ownership. */
 function failing(next: readonly OrderItem[], needed: readonly OrderItem[]): Gap[] {
  return needed.flatMap((source): Gap[] => {
   const covering = next.filter(item => item.kind === source.kind && item.from.some(id => source.from.includes(id)));
   if (!covering.length) return [{ source, omitted: true, missing: [] }];
-  const missing = covering.map(item => missingCoverage(wording(source), wording(item))).reduce((best, current) => current.length < best.length ? current : best);
+  const missing = covering.map(item => missingTokens(wording(source), wording(item))).reduce((best, current) => current.length < best.length ? current : best);
   return missing.length ? [{ source, omitted: false, missing }] : [];
  });
 }
@@ -198,10 +191,10 @@ export class Orders {
  private unscanned = new Map<number, string>();
  /** Recorded messages not yet consolidated. Persisted, so a restart finishes what a batch had not published. */
  private open = new Set<number>();
- private legacy = new Set<number>();
- private superseded = new Set<number>();
- /** Superseding records already reflected in ledger.json, independent of its message boundary. */
- private consolidatedSupersedes = new Set<number>();
+ private migrationDone = false;
+ private migrationStarted = false;
+ private migrated?: Ledger;
+ private migrationWork: Promise<void> = Promise.resolve();
  /** History messages already covered by built nodes, waiting for the one-time backfill. */
  private backlog = new Map<number, BackfillItem>();
  private draining: Promise<void> = Promise.resolve();
@@ -218,15 +211,8 @@ export class Orders {
   const file = join(directory, 'orders.jsonl');
   if (existsSync(file)) for (const line of readFileSync(file, 'utf8').split('\n').filter(Boolean)) {
    const r = JSON.parse(line);
-   if (!Number.isSafeInteger(r.i) || r.i < 0 || typeof r.date !== 'string'
-    || (r.supersedes !== undefined && r.supersedes !== true)
-    || (this.records.has(r.i) ? r.supersedes !== true || this.superseded.has(r.i) : r.supersedes === true))
-    throw Error('Invalid/duplicate orders record.');
-   const orders = directives(r.orders);
-   this.records.set(r.i, { i: r.i, date: r.date, orders });
-   if (r.supersedes === true) { this.superseded.add(r.i); this.legacy.delete(r.i); }
-   else if (r.orders.some((order: unknown) => typeof order === 'string'
-    || (typeof order === 'object' && order && !('retire' in order) && !('said' in order)))) this.legacy.add(r.i);
+   if (!Number.isSafeInteger(r.i) || r.i < 0 || typeof r.date !== 'string' || this.records.has(r.i)) throw Error('Invalid/duplicate orders record.');
+   this.records.set(r.i, { i: r.i, date: r.date, orders: directives(r.orders) });
   }
   const ledger = join(directory, 'ledger.json');
   if (existsSync(ledger)) {
@@ -249,15 +235,11 @@ export class Orders {
     if (!Array.isArray(saved.open) || !saved.open.every((i: unknown) => Number.isSafeInteger(i) && (i as number) >= 0)) throw Error('Invalid open orders.');
     for (const i of saved.open) this.open.add(i);
    }
-   if (saved.consolidatedSupersedes !== undefined) {
-    if (!Array.isArray(saved.consolidatedSupersedes) || !saved.consolidatedSupersedes.every((i: unknown) => Number.isSafeInteger(i) && this.superseded.has(i as number)))
-     throw Error('Invalid consolidated superseding ids.');
-    this.consolidatedSupersedes = new Set(saved.consolidatedSupersedes);
-   }
+   if (saved.migrationDone !== undefined && typeof saved.migrationDone !== 'boolean') throw Error('Invalid ledger migration marker.');
+   this.migrationDone = saved.migrationDone === true;
   }
   // A record past the ledger boundary is still to consolidate, whether or not a batch had saved it as open.
   for (const r of this.records.values()) if (r.i > this.ledger.through) this.open.add(r.i);
-  for (const i of this.superseded) if (!this.consolidatedSupersedes.has(i)) this.open.add(i);
  }
  /** Opens the history. Eligible messages no call has recorded are queued for the summarizer; the ones a built compressed node
   * already covers (`covered`) are backfilled once, batched with their nearby talk, and then the ledger is published. */
@@ -271,12 +253,14 @@ export class Orders {
     before = boundedTalk(e.text, true);
     continue;
    }
-   if (!eligible(e) || (!this.legacy.has(e.i) && (this.records.has(e.i) || !covered(e.i)))) continue;
-   const item: BackfillItem = { i: e.i, text: e.text, ...(before !== undefined ? { before } : {}),
-    ...(this.legacy.has(e.i) ? { previous: this.records.get(e.i)!.orders.map(plainDirective) } : {}) };
+   if (!eligible(e) || this.records.has(e.i) || !covered(e.i)) continue;
+   const item: BackfillItem = { i: e.i, text: e.text, ...(before !== undefined ? { before } : {}) };
    this.backlog.set(e.i, item); awaiting.push(item);
   }
   this.draining = this.runBackfill();
+  if (this.loaded && !this.migrationDone && !this.migrationStarted) {
+   this.migrationStarted = true; this.migrationWork = this.migrateLedger(entries);
+  }
   const through = entries.length - 1;
   if (this.pendingThrough !== undefined && this.pendingThrough > this.ledger.through) {
    // A restart interrupted this consolidation (see `pending` in ledger.json): finishing it is blocking work.
@@ -288,7 +272,100 @@ export class Orders {
   }
  }
  /** Resolves when the history backfill has finished (or was stopped). */
- async drain() { await this.draining; }
+ async drain() { await Promise.all([this.draining, this.migrationWork]); }
+ private async migrateLedger(entries: readonly Entry[]) {
+  const sources = new Map<number, MigrationItem['sources'][number]>();
+  const wanted = new Set(this.ledger.items.flatMap(item => item.from));
+  let before: string | undefined;
+  const awaiting: MigrationItem['sources'] = [];
+  for (const entry of entries) {
+   if (entry.kind === 'talk') {
+    for (const source of awaiting.splice(0)) source.after = boundedTalk(entry.text, false);
+    before = boundedTalk(entry.text, true);
+   } else if (wanted.has(entry.i)) {
+    const source = { i: entry.i, said: entry.text, ...(before !== undefined ? { before } : {}) };
+    sources.set(entry.i, source); awaiting.push(source);
+   }
+  }
+  const original = this.ledger;
+  const migrated: OrderItem[] = [];
+  for (let at = 0; at < original.items.length && !this.stopped; at += BACKFILL_BATCH) {
+   const batch = original.items.slice(at, at + BACKFILL_BATCH).map((item, offset) => ({
+    ...ledgerItem(item), index: at + offset, sources: item.from.flatMap(id => sources.has(id) ? [sources.get(id)!] : []),
+   }));
+   let answer: unknown;
+   try { answer = await this.task({ kind: 'migrate', items: batch }, this.controller.signal); }
+   catch (error) { if (this.stopped) return; this.warn(`Orders migration: ${String(error)}`); }
+   const groups: { indexes: number[]; order: StandingOrder; accepted: MigrationItem[] }[] = [];
+   if (Array.isArray(answer)) for (const raw of answer) {
+    if (typeof raw !== 'object' || !raw) continue;
+    const indexes = 'indexes' in raw ? raw.indexes : 'index' in raw ? [raw.index] : [];
+    if (!Array.isArray(indexes) || !indexes.length || !indexes.every(index => Number.isSafeInteger(index) && batch.some(item => item.index === index))) continue;
+    try { groups.push({ indexes, order: standing(raw), accepted: [] }); } catch {}
+   }
+   const fallbacks: OrderItem[] = [];
+   for (const item of batch) {
+    const owners = groups.flatMap(group => group.indexes.flatMap(index => index === item.index ? [group] : []));
+    const candidate = owners.length === 1 ? owners[0] : undefined;
+    const context = item.sources.flatMap(source => [source.said, source.before, source.after]).filter(Boolean).join('\n');
+    const reason = !candidate ? `index appears ${owners.length} times`
+     : item.kind !== candidate.order.kind ? 'kind changed'
+     : item.until && !candidate.order.until ? 'done-condition omitted'
+     : !item.until && candidate.order.until ? 'done-condition invented'
+     : [...missingTokens(item.text, candidate.order.text, context),
+       ...(item.until ? missingTokens(item.until, candidate.order.until!, context) : [])].join(', ');
+    if (reason) {
+     fallbacks.push(ledgerItem(item));
+     this.warn(`Orders migration item ${item.index}: kept verbatim (${reason}): ${item.text}`);
+    } else candidate!.accepted.push(item);
+   }
+   for (const group of groups) if (group.accepted.length) {
+    const from = [...new Set(group.accepted.flatMap(item => item.from))];
+    const newest = group.accepted.reduce((a, b) => Math.max(...a.from) > Math.max(...b.from) ? a : b);
+    migrated.push(ledgerItem({ ...group.order, from, date: newest.date }));
+   }
+   migrated.push(...fallbacks);
+  }
+  if (!this.stopped) this.migrated = { through: original.through, items: migrated };
+ }
+ private coverLedger(next: (OrderItem & { covers: number[] })[], ledger: Ledger, records: ExtractedOrders[], targets: RetirementEvent[]) {
+  const accepted = new Map<number, number>();
+  const replaced = new Set<number>();
+  const fallbacks: OrderItem[] = [];
+  for (let index = 0; index < ledger.items.length; index++) {
+   const old = ledger.items[index];
+   if (retired(old, targets)) continue;
+   const owners = next.flatMap((item, owner) => item.covers.flatMap(cover => cover === index ? [owner] : []));
+   const owner = owners.length === 1 ? owners[0] : undefined;
+   const candidate = owner === undefined ? undefined : next[owner];
+   const replacement = candidate && candidate.from.some(id => id > Math.max(...old.from)
+    && this.records.get(id)?.orders.some(order => !('retire' in order))
+    && (records.some(record => record.i === id) || candidate.covers.some(index => ledger.items[index]?.from.includes(id))))
+    && old.from.some(id => candidate.text.includes(`(replaces msg ${id})`));
+   const reason = !candidate ? `index appears ${owners.length} times`
+    : replacement ? ''
+    : old.kind !== candidate.kind ? 'kind changed'
+    : old.until && !candidate.until ? 'done-condition omitted'
+    : [...missingTokens(old.text, candidate.text),
+      ...(old.until ? missingTokens(old.until, candidate.until!) : [])].join(', ');
+   if (reason) {
+    fallbacks.push(ledgerItem(old));
+    this.warn(`Orders consolidation item ${index}: kept verbatim (${reason}): ${old.text}`);
+   } else {
+    accepted.set(index, owner!);
+    if (replacement) replaced.add(index);
+   }
+  }
+  const freshIds = new Set(records.filter(record => record.orders.some(order => !('retire' in order))).map(record => record.i));
+  const mapped: OrderItem[] = [];
+  for (let owner = 0; owner < next.length; owner++) {
+   const item = next[owner];
+   const covered = [...accepted].flatMap(([index, candidate]) => candidate === owner && !replaced.has(index) ? [ledger.items[index]] : []);
+   const from = [...new Set([...covered.flatMap(old => old.from), ...item.from.filter(id => freshIds.has(id))])];
+   if (from.length) mapped.push(ledgerItem({ ...item, from }));
+  }
+  return [...mapped, ...fallbacks];
+ }
  private async runBackfill() {
   const queue = [...this.backlog.values()].sort((a, b) => a.i - b.i);
   for (let at = 0; at < queue.length && !this.stopped; at += BACKFILL_BATCH) {
@@ -326,34 +403,10 @@ export class Orders {
  * name the summarizer heard there count as kept. */
 recordAll(scanned: ReadonlyMap<number, readonly OrderDirective[]>, context = '') {
   for (const [i, orders] of scanned) {
-   const supersedes = this.legacy.has(i);
-   const date = supersedes ? this.records.get(i)?.date : this.unscanned.get(i);
-   if ((!supersedes && this.records.has(i)) || date === undefined) continue;
+   const date = this.unscanned.get(i);
+   if (this.records.has(i) || date === undefined) continue;
    const record: ExtractedOrders = { i, date, orders: orders.map(order => guarded('retire' in order ? order : standing(order), context)) };
-   if (supersedes) for (const previous of this.records.get(i)!.orders) {
-    if ('retire' in previous || previous.kind !== 'goal' || !previous.until) continue;
-    const intact = record.orders.some(order => !('retire' in order) && order.kind === 'goal' && order.until
-     && !missingTokens(previous.until!, order.until).length);
-    if (intact) continue;
-    // Preserve the complete newly recovered permission/fix wording; only restore the lost finite goal metadata.
-    const at = record.orders.findIndex(order => !('retire' in order)
-     && (order.said ?? order.text).toLowerCase().includes((previous.said ?? previous.text).toLowerCase()));
-    if (at >= 0) {
-     const order = record.orders[at] as StandingOrder;
-     record.orders[at] = { ...order, kind: 'goal', until: previous.until };
-    } else record.orders.push(previous);
-    this.warn(`Orders migration: preserved goal done-condition for msg ${i}: ${previous.until}`);
-   }
-   if (supersedes) for (const previous of this.records.get(i)!.orders) {
-    if ('retire' in previous) continue;
-    const covered = record.orders.some(order => !('retire' in order) && order.kind === previous.kind
-     && !missingCoverage(wording(previous), wording(order)).length);
-    if (covered) continue;
-    record.orders.push({ ...previous, said: previous.text, text: previous.text });
-    this.warn(`Orders migration: carried uncovered order verbatim for msg ${i}: ${previous.text}`);
-   }
-   appendJson(join(this.directory, 'orders.jsonl'), { ...record, ...(supersedes ? { supersedes: true } : {}) });
-   if (supersedes) { this.legacy.delete(i); this.superseded.add(i); }
+   appendJson(join(this.directory, 'orders.jsonl'), record);
    this.records.set(i, record); this.unscanned.delete(i); this.backlog.delete(i); this.open.add(i);
   }
  }
@@ -363,7 +416,7 @@ recordAll(scanned: ReadonlyMap<number, readonly OrderDirective[]>, context = '')
   atomicWrite(join(this.directory, 'ledger.json'), JSON.stringify({
    through: this.ledger.through, items: this.ledger.items.map(ledgerItem),
    ...(this.raw.length ? { raw: this.raw.map(ledgerItem) } : {}), ...(this.retire.length ? { retire: this.retire } : {}),
-   ...(this.consolidatedSupersedes.size ? { consolidatedSupersedes: [...this.consolidatedSupersedes] } : {}),
+   ...(this.migrationDone ? { migrationDone: true } : {}),
    ...(this.open.size ? { open: [...this.open] } : {}), ...extra,
   }));
  }
@@ -374,24 +427,28 @@ recordAll(scanned: ReadonlyMap<number, readonly OrderDirective[]>, context = '')
   }
   this.publication = this.publication.then(async () => {
    if (through <= this.ledger.through) return;
-   await this.draining;
+   await this.drain();
    const records = [...this.records.values()].filter(r => this.open.has(r.i) && r.i <= through).sort((a, b) => a.i - b.i);
-   const migrated = new Set(records.filter(r => this.superseded.has(r.i) && !this.consolidatedSupersedes.has(r.i)).map(r => r.i));
-   // Old text for re-extracted sources must not compete with their clean restatements or re-enter guard fallbacks.
-   const ledger: Ledger = { through: this.ledger.through, items: this.ledger.items.map(item => ({ ...item, from: item.from.filter(i => !migrated.has(i)) })).filter(item => item.from.length) };
+   const ledger = this.migrated ?? this.ledger;
    const targets = records.flatMap(r => r.orders.flatMap(order => 'retire' in order ? [{ i: r.i, retire: order.retire }] : []));
    const payload = records.map(r => ({ i: r.i, date: r.date, orders: r.orders.map(plainDirective) }));
    let retry: string | undefined;
    for (let attempt = 0; attempt < 3; attempt++) try {
-    const next = items(await this.task({ kind: 'consolidate', ledger, records: payload, through, retry }, this.controller.signal)).filter(item => !retired(item, targets));
+    const answer = await this.task({ kind: 'consolidate', ledger, records: payload, through, retry }, this.controller.signal);
+    const next = items(answer).map((item, index) => {
+     const raw = (answer as unknown[])[index];
+     const covers = typeof raw === 'object' && raw && 'covers' in raw && Array.isArray(raw.covers)
+      && raw.covers.every(i => Number.isSafeInteger(i) && i >= 0 && i < ledger.items.length) ? raw.covers as number[] : [];
+     return { ...item, covers };
+    }).filter(item => !retired(item, targets));
     const replacedBy = (previous: OrderItem) => next.some(item => item.from.some(id => records.some(r => r.i === id && r.i > Math.max(...previous.from) && r.orders.some(order => !('retire' in order))))
      && previous.from.some(id => item.text.includes(`(replaces msg ${id})`)));
-    const kept = ledger.items.filter(item => !retired(item, targets) && !replacedBy(item));
+    const mapped = this.coverLedger(next, ledger, records, targets);
     const fresh = payload.flatMap(r => r.orders.flatMap(order => 'retire' in order ? [] : [{ ...order, from: [r.i], date: r.date }])).filter(order => !retired(order, targets) && !replacedBy(order));
-    const needed = [...kept, ...fresh];
-    const gaps = failing(next, needed);
+    const needed = fresh;
+    const gaps = failing(mapped, needed);
     if (gaps.length && attempt < 2) { retry = retryNote(gaps); continue; }
-    const final = gaps.length ? substitute(next, needed, gaps) : next;
+    const final = gaps.length ? substitute(mapped, needed, gaps) : mapped;
     if (failing(final, needed).length) throw Error('Verbatim fallback did not restore coverage.');
     if (gaps.length) this.warn(`Orders consolidation: kept the verbatim wording of ${gaps.length} order(s) that lost conditions after retries (msg ${gaps.map(gap => gap.source.from.join(', ')).join('; ')}).`);
     const dates = new Map<number, string>();
@@ -407,11 +464,11 @@ recordAll(scanned: ReadonlyMap<number, readonly OrderDirective[]>, context = '')
     const pendingAgain = this.pendingThrough !== undefined && this.pendingThrough > through ? { pending: this.pendingThrough } : {};
     if (this.pendingThrough === through) this.pendingThrough = undefined;
     for (const r of records) this.open.delete(r.i);
-    const consolidatedSupersedes = new Set([...this.consolidatedSupersedes, ...migrated]);
+    const migrationDone = this.migrationDone || !!this.migrated || !this.loaded;
     const saved = { through, items: ledgerItems, ...(this.open.size ? { open: [...this.open] } : {}),
-     ...(consolidatedSupersedes.size ? { consolidatedSupersedes: [...consolidatedSupersedes] } : {}), ...pendingAgain };
+     ...(migrationDone ? { migrationDone: true } : {}), ...pendingAgain };
     atomicWrite(join(this.directory, 'ledger.json'), JSON.stringify(saved));
-    this.consolidatedSupersedes = consolidatedSupersedes;
+    this.migrationDone = migrationDone; this.migrated = undefined;
     this.ledger = { through, items: ledgerItems }; this.raw = []; this.retire = []; this.loaded = true; return;
    } catch (error) { if (this.stopped) return; this.warn(`Orders consolidation: ${String(error)}`); }
    this.raw = records.flatMap(r => r.orders.flatMap(order => 'retire' in order ? [] : [ledgerItem({ ...order, from: [r.i], date: r.date })]));
@@ -434,5 +491,5 @@ recordAll(scanned: ReadonlyMap<number, readonly OrderDirective[]>, context = '')
   })]);
  }
  render() { return renderOrders([...this.ledger.items, ...this.raw].filter(item => !retired(item, this.retire)), this.ledger.through); }
- async close() { this.stopped = true; this.controller.abort(); await Promise.all([this.publication, this.bootstrap, this.replay ?? Promise.resolve(), this.draining]); }
+ async close() { this.stopped = true; this.controller.abort(); await Promise.all([this.publication, this.bootstrap, this.replay ?? Promise.resolve(), this.draining, this.migrationWork]); }
 }

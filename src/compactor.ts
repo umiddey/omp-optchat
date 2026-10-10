@@ -4,7 +4,7 @@ import type { ModelRegistry } from '@oh-my-pi/pi-coding-agent';
 import { COMPACT, compaction, tooLong } from './prompts.ts';
 import { bytes, NODE, type Compressor } from './memory.ts';
 import { cachePayload, splitView } from './cache.ts';
-import { EXTRACT_ORDERS, CONSOLIDATE_ORDERS } from './prompts.ts';
+import { EXTRACT_ORDERS, MIGRATE_LEDGER, CONSOLIDATE_ORDERS } from './prompts.ts';
 import { orderMap, type OrderDirective, type OrderTask } from './orders.ts';
 
 export interface ModelChoice { provider: string; model: string; thinking: ThinkingLevel }
@@ -105,7 +105,7 @@ export function createOrderTask(registry: ModelRegistry, choice: () => ModelChoi
     const note = input.kind === 'consolidate' && input.retry ? `${input.retry}\n` : '';
     const messages: Message[] = [{ role: 'user', content: `${note}${JSON.stringify(input.kind === 'consolidate' ? { ...input, retry: undefined } : input)}`, timestamp: Date.now() }];
     const reply = await streamSimple(model, {
-      systemPrompt: [input.kind === 'backfill' ? EXTRACT_ORDERS : CONSOLIDATE_ORDERS], messages,
+      systemPrompt: [input.kind === 'backfill' ? EXTRACT_ORDERS : input.kind === 'migrate' ? MIGRATE_LEDGER : CONSOLIDATE_ORDERS], messages,
     }, { apiKey: await registry.getApiKey(model), sessionId: 'optchat-orders', reasoning: reasoningFor(model, ThinkingLevel.Medium),
       signal, cacheRetention: 'short' }).result();
     onUsage(reply);
