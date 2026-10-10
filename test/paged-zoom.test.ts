@@ -1,17 +1,18 @@
 import { test } from 'bun:test';
 import assert from 'node:assert/strict';
-import { mkdtempSync, rmSync } from 'node:fs';
+import { mkdtempSync, rmSync, mkdirSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { Memory, CAP, PAGE } from '../src/memory.ts';
 
-test('zoom pages a long message without splitting characters, and leaves short ones whole', async () => {
+test('zoom pages an existing long message without splitting characters, and leaves short ones whole', async () => {
   const dir = mkdtempSync(join(tmpdir(), 'optchat-large-'));
+  const long = 'a'.repeat(PAGE - 1) + '😀' + 'b'.repeat(40_000);
+  // Pre-cutover persisted messages are immutable and must still page in full.
+  mkdirSync(join(dir, 'main'));
+  writeFileSync(join(dir, 'main', '2026-10-10.jsonl'), ['short', long].map((text, i) => JSON.stringify({ i, kind: 'user', text, date: '2026-10-10T00:00:00Z' })).join('\n') + '\n');
   const memory = new Memory(dir, async () => 'summary', () => {});
   try {
-    memory.append('user', 'short');
-    const long = 'a'.repeat(PAGE - 1) + '😀' + 'b'.repeat(40_000);
-    memory.append('user', long);
     assert.equal(memory.zoom(0, 1), '0+0|user: short');
     let text = '', offset: number | undefined;
     for (let pages = 0; pages < 3; pages++) {

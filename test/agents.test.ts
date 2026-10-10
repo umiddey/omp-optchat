@@ -107,10 +107,14 @@ test('renderer includes briefs, replies, tool JSON, bounded echoes and told mess
 });
 test('transcript pages match memory offsets, limits and surrogate boundaries exactly', async () => {
   const f = fixture();
-  const memory = new Memory(f.profile, async () => 'summary', () => {});
+  let memory: Memory | undefined;
   try {
     const file = join(f.childDir, 'Alpha.jsonl'); transcript(file, 'a'.repeat(PAGE - 6) + '😀' + 'b'.repeat(40000));
-    const a = new AgentIndex(f.profile); a.scan(f.session); const text = renderTranscript(file); memory.append('user', text);
+    const a = new AgentIndex(f.profile); a.scan(f.session); const text = renderTranscript(file);
+    // Existing unsplit long records retain the same paging contract as transcripts.
+    mkdirSync(join(f.profile, 'main'), { recursive: true });
+    writeFileSync(join(f.profile, 'main', '2026-10-10.jsonl'), JSON.stringify({ i: 0, kind: 'user', text, date: '2026-10-10T00:00:00Z' }) + '\n');
+    memory = new Memory(f.profile, async () => 'summary', () => {});
     for (const [offset, limit] of [[undefined, undefined], [PAGE, undefined], [PAGE, 1], [10, 5]] as const) {
       const expected = memory.zoom(0, 1, offset, limit).slice('0+0|user: '.length);
       assert.equal(a.zoom('Alpha', offset, limit), expected);
@@ -126,9 +130,9 @@ test('transcript pages match memory offsets, limits and surrogate boundaries exa
     assert.throws(() => a.zoom('Alpha', 0, 0), /positive integer/);
     transcript(file, 'short'); assert.equal(a.zoom('Alpha'), 'user|short');
     assert.match(a.zoom('Alpha', 0, 2), /fits in one zoom/);
-  } finally { await memory.close(); f.close(); }
+  } finally { await memory?.close(); f.close(); }
 });
-test('shown reports log as work and task/async reports end with one trailer per agent even when capped', async () => {
+test('shown reports log as work and task/async reports retain trailers, including capped task tool output', async () => {
   const f = fixture(), memory = new Memory(f.profile, async () => 'summary', () => {});
   try {
     const message = task(['Alpha', 'Beta']); message.content = [{ type: 'text', text: 'x'.repeat(40000) }]; logMessage(memory, message);

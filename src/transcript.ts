@@ -21,8 +21,9 @@ export function agentNames(message: AgentMessage): string[] {
   }
   return [...new Set(names.filter(name => /^[\w.-]+$/.test(name)))];
 }
-const reportText = (text: string, names: string[]) => {
+const reportText = (text: string, names: string[], toolOutput = true) => {
   const trailer = names.map(name => `Full chat: zoom(${JSON.stringify(name)})`).join('\n');
+  if (!toolOutput) return trailer ? text + '\n' + trailer : text;
   return trailer ? cap(text, CAP - trailer.length - 1) + '\n' + trailer : cap(text);
 };
 export function textContent(content: unknown, images = true): string {
@@ -48,7 +49,7 @@ export function logMessage(memory: Memory, original: AgentMessage) {
   const message = asUser(original);
   const date = new Date(message.timestamp).toISOString();
   if (original.role === 'custom' && original.display && ['async-result', 'irc:incoming'].includes(original.customType)) {
-    memory.append('work', reportText(`[${original.customType}] ${textContent(original.content)}`, original.customType === 'async-result' ? agentNames(original) : []), date);
+    memory.append('work', reportText(`[${original.customType}] ${textContent(original.content)}`, original.customType === 'async-result' ? agentNames(original) : [], false), date);
     return;
   }
   if (message.role === 'user') memory.append('user', textContent(message.content), date);

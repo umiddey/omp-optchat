@@ -285,3 +285,79 @@ that missing-cut fallback can choose a fresh latest assistant on that same conte
 
 Verification: `bun test`, exit 0, 81 pass, 0 fail, 11 files, 35 expect assertions plus existing node assertions.
 `bunx tsc --noEmit`, exit 0. No live rerun requested for this anchor-only correction.
+
+## Recipe conformance — recipe-conformance (2026-10-10)
+
+Spec: Victor Taelin's complete recipe (gist 91837951a5ce5b38f341ec1ba1df6449).
+Audit before editing and phase evidence are recorded in untracked `HANDOFF-recipe.md`.
+
+Restored §5 verbatim in the static turn and compactor texts (Unii→OptChat,
+unii→talk; permitted device paragraph omission). Existing reply kinds and nodes
+are unchanged. New profiles default to Haiku xhigh; explicit old config efforts
+remain intact. §4 fitting output stops without a false too-long retry; contexts
+stop at the first unbuilt line. Failed nodes retry on the next message as well
+as the deliberate availability timer. Non-tool long text, including async/IRC
+work reports, splits losslessly into consecutive 30,000-character messages;
+tool outputs remain capped, and existing unsplit records retain paged zoom.
+
+Documented owner-approved exceptions in DESIGN: compactor omits OMP's prompt/tools
+because turn and compaction models differ; damaged/missing view recovery; turn
+availability fallback/timer. Preserved existing rollover, memories, TTL/marks,
+plain OMP children/transcripts/socket integration.
+
+Red evidence: targeted recipe suite exit 1 (7 pass, 5 fail); next-message retry
+exit 1 (100 vs 200 attempts); async work losslessness exit 1 (clipped interior).
+Final restoration verification: `bun test && bunx tsc --noEmit`, exit 0,
+88 pass / 0 fail, 13 files, 35 expect calls; TypeScript clean.
+
+### Copied real-memory measurements
+
+Read-only snapshot: 3,492 messages / 6,978 nodes; main checkout prompt baseline
+matched starting `src/prompts.ts`. Replayed real Haiku via one `streamSimple`
+protocol, real task/retry/cache/effort helpers, three samples/variant.
+Context A uses reconstructed real `Memory.compactionView`; historical request
+payloads/views/readiness are unavailable. Context B retains earlier context but
+shows only the two child lines inside the merged range. No tree rebuild/migration.
+
+Commands: `bun .recipe-eval.ts` exit 0 (108 compactions, 322.31 s);
+`env RECIPE_SUPPLEMENT=1 bun .recipe-eval.ts` exit 0 (27 more, 210.92 s).
+135 compactions / 335 underlying calls, no provider-error retries.
+The temporary harness is archived in `/tmp/optchat-recipe-results.md`, alongside
+every source/output and per-request token/latency/cost record. It uses six worker
+jobs and does not reproduce production warm-prefix gating; costs are
+model/catalog-reported estimates, not an invoice.
+
+| Full goal retained | OLD medium | Restored medium | Restored xhigh |
+|---|---:|---:|---:|
+| A: 16+16 | 0/3 | 0/3 | 0/3 |
+| A: 0+32 | 0/3 | 0/3 | 0/3 |
+| A: chained 0+64 | 0/3 | 0/3 | 0/3 |
+| B: 16+16 | 0/3 | 0/3 | 0/3 |
+| B: 0+32 | 0/3 | 0/3 | 0/3 |
+| B: chained 0+64 | 0/3 | 0/3 | 0/3 |
+| Ten A lost-order targets (3 samples each) | 10/30 | 11/30 | 16/30 |
+
+Full goal requires every endpoint/table, witnessed real UI, 0 waived, 0 baselined.
+Snapshot 16+16 already omits endpoint/table and baselined, although leaf24
+preserves the goal. Strict-child contexts cannot recover absent input details.
+The ten targets include 16+16 as its narrower dropped-zero-baselined check.
+Retention uses reviewed clause-specific predicates (not topic similarity);
+initial permissive lexical flags remain in raw evidence, alongside corrected
+flags. No samples were excluded or rerun.
+
+| All contexts, 45 compactions/variant | OLD | Restored medium | Restored xhigh |
+|---|---:|---:|---:|
+| Mean input tokens, including cache | 29,156 | 33,661 | 9,346 |
+| Mean output tokens, including thinking | 1,137 | 1,590 | 9,586 |
+| Mean latency seconds | 6.19 | 8.17 | 38.93 |
+| Mean calls/compaction | 3.09 | 3.33 | 1.02 |
+| Final outputs above 512 bytes | 8 | 9 | 0 |
+| Total estimated USD | 0.058967 | 0.070125 | 0.221836 |
+| USD/compaction | 0.001310 | 0.001558 | 0.004930 |
+
+Conclusion: prompt-only gain was small (10→11/30); added effort improved sampled
+order retention (11→16/30) but did not preserve the full goal. Xhigh averaged
+3.76× OLD cost and 6.29× latency, while sharply reducing size retries.
+Three samples on selected failure cases do not establish a general guarantee.
+Recipe restoration affects new nodes only; existing losses remain recoverable
+only by zooming to original messages, not by a prohibited migration.

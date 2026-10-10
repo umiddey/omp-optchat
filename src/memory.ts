@@ -154,9 +154,22 @@ export class Memory {
     for (let i = loaded; i < this.root.length; i++) { this.push(i); this.fit(i + 1); }
     this.fit(); this.save(); this.schedule();
   }
-  append(kind: Kind, text: string, date = new Date().toISOString(), receipt?: string) {
+  append(kind: Kind, text: string, date = new Date().toISOString(), receipt?: string): Entry {
     if (this.stopped) throw new Error('Memory is closed.');
     if (this.failed) throw new Error(`Memory could not be saved: ${this.failed}`);
+    // The recipe gives no non-tool chunk size; use the tool budget, without cutting any text.
+    if (kind !== 'echo' && text.length > CAP) {
+      let first: Entry | undefined;
+      for (let at = 0; at < text.length;) {
+        let to = Math.min(at + CAP, text.length);
+        if (to < text.length && /[\ud800-\udbff]/.test(text[to - 1]) && /[\udc00-\udfff]/.test(text[to])) to--;
+        const entry = this.append(kind, text.slice(at, to), date, receipt);
+        first ??= entry; at = to;
+      }
+      return first!;
+    }
+    // A failed call is eligible again at the next message, even before the availability timer.
+    for (const id of this.retryAt.keys()) this.retryAt.set(id, 0);
     const entry: Entry = { i: this.root.length, kind, text, date, size: bytes(`${kind}: ${text}`), ...(receipt ? { receipt } : {}) };
     void this.enqueue(() => this.store.append(entry), error => {
       this.failed ??= error instanceof Error ? error.message : String(error);
@@ -290,11 +303,10 @@ export class Memory {
     if (!this.retryAt.size) this.lastError = undefined;
     if (this.fit()) this.save();
   }
-  /** The compactions' view up to the node. A line still being built shows as a placeholder instead of ending the view: an A/B on
-   * real turns (#101) found that cutting there also hid the built lines after it, such as an echo's own tool call. */
+  /** The compactions' view stops at the first unbuilt line (recipe §4). */
   private compactionView(part: Part) {
     const boundary = part.l === 0 ? start(part) : end(part), lines: string[] = [];
-    for (const p of this.compaction.parts) { if (end(p) > boundary) break; lines.push(`${start(p)}+${2 ** p.l}|${flat(this.text(p))}`); }
+    for (const p of this.compaction.parts) { if (end(p) > boundary || !this.node(p)) break; lines.push(`${start(p)}+${2 ** p.l}|${flat(this.text(p))}`); }
     return `${VIEW_OPEN}${lines.join('\n')}\n</chat>`;
   }
   private queueParent({ l, i }: Part) {

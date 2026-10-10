@@ -40,7 +40,7 @@ test('a second writer whose first write starts a new day file is refused when th
   finally { await reopened.close(); rmSync(dir, { recursive: true, force: true }); }
 });
 
-test('a summary sees the built lines after one still being built, such as an echo\'s own tool call', async () => {
+test('a compaction view stops at its first unbuilt line, without placeholders or later built lines', async () => {
   const dir = mkdtempSync(join(tmpdir(), 'optchat-gaps-'));
   const calls: { input: Compression; release: () => void }[] = [];
   const memory = new Memory(dir, input => new Promise(resolve => calls.push({ input, release: () => resolve('s'.repeat(300)) })), () => {});
@@ -50,8 +50,7 @@ test('a summary sees the built lines after one still being built, such as an ech
     memory.append('echo', `contents ${'.'.repeat(600)}`);
     await new Promise(resolve => setTimeout(resolve, 20));
     const echo = calls.find(c => c.input.part.i === 2)!.input.context;
-    assert.match(echo, /^0\+1\|\(not summarized yet: zoom it\)$/m);
-    assert.match(echo, /^1\+1\|tool: read src\/memory\.ts$/m);
+    assert.equal(echo, '<chat>\n\n</chat>');
   } finally { calls.forEach(c => c.release()); await memory.close(); rmSync(dir, { recursive: true, force: true }); }
 });
 

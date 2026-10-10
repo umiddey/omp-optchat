@@ -18,12 +18,23 @@ test('logging preserves users, replies, tool JSON and shown custom messages, exc
     logMessage(m, { role: 'custom', customType: 'fixture', content: 'shown', display: true, timestamp: 2 });
     logMessage(m, { role: 'custom', customType: 'fixture', content: 'HIDDEN', display: false, timestamp: 3 });
     logMessage(m, { role: 'toolResult', toolCallId: 'z1', toolName: 'read', content: [{ type: 'text', text: 'HEAD' + 'x'.repeat(40000) + 'TAIL' }], isError: false, timestamp: 4 });
-    assert.deepEqual(m.root.map(e => e.kind), ['user', 'talk', 'tool', 'user', 'echo']);
-    assert.equal(m.root[0].text.length, 40000);
-    assert.equal(m.root[2].text, 'zoom {"id":1,"n":1}'); assert.equal(m.root[3].text, '[fixture] shown');
-    assert.ok(m.root[4].text.length <= CAP); assert.ok(m.root[4].text.includes('HEAD') && m.root[4].text.endsWith('TAIL'));
+    assert.deepEqual(m.root.map(e => e.kind), ['user', 'user', 'talk', 'tool', 'user', 'echo']);
+    assert.equal(m.root[0].text + m.root[1].text, 'u'.repeat(40000));
+    assert.deepEqual(m.root.slice(0, 2).map(e => e.text.length), [30000, 10000]);
+    assert.equal(m.root[3].text, 'zoom {"id":1,"n":1}'); assert.equal(m.root[4].text, '[fixture] shown');
+    assert.ok(m.root[5].text.length <= CAP); assert.ok(m.root[5].text.includes('HEAD') && m.root[5].text.endsWith('TAIL'));
     assert.ok(!JSON.stringify(m.root).includes('PRIVATE') && !JSON.stringify(m.root).includes('HIDDEN'));
   } finally { await m.close(); rmSync(dir, { recursive: true, force: true }); }
+});
+test('long async work reports are split without clipping and retain transcript trailers', async () => {
+  const dir = mkdtempSync(join(tmpdir(), 'optchat-work-'));
+  const memory = new Memory(dir, async () => 'summary', () => {});
+  const text = 'HEAD' + 'x'.repeat(40000) + 'TAIL';
+  try {
+    logMessage(memory, { role: 'custom', customType: 'async-result', content: text, display: true, details: { jobs: [{ jobId: 'Alpha' }] }, timestamp: 1 });
+    assert.equal(memory.root.map(e => e.text).join(''), `[async-result] ${text}\nFull chat: zoom("Alpha")`);
+    assert.deepEqual(memory.root.map(e => e.kind), ['work', 'work']);
+  } finally { await memory.close(); rmSync(dir, { recursive: true, force: true }); }
 });
 test('images round trip once, with original content-addressed references', async () => {
   const dir = mkdtempSync(join(tmpdir(), 'optchat-images-'));

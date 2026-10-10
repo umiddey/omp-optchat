@@ -74,8 +74,7 @@ export function createCompressor(registry: ModelRegistry, choice: () => ModelCho
       const line = reply.content.filter(c => c.type === 'text').map(c => c.text).join('').trim().replace(/^\d+\+\d+\|\s*/, '');
       if (!line) throw new Error('Compactor returned no text.');
       tries.push(line);
-      // A merge of two short lines can come back nearly as big as both, so a line must also shrink what it replaces.
-      if (bytes(line) <= accepted() && bytes(line) < bytes(input.source)) break;
+      if (bytes(line) <= accepted()) break;
       messages.push(reply);
       const cut = Buffer.from(line).subarray(0, NODE).toString('utf8').replace(/\uFFFD$/, '');
       messages.push({ role: 'user', content: tooLong(bytes(line), cut), timestamp: Date.now() });

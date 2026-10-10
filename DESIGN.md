@@ -31,8 +31,43 @@ their results are logged like any tool result.
 - One process per profile (recipe §1 "one process owns a chat"): lock with PID + liveness check (port
   pi-optchat `profiles.ts` lock logic, simplified). A second OMP on a held profile: TUI → notify error and
   refuse input (`input` handler returns handled); print/rpc → throw. No silent fallback to plain OMP.
-- `config.json`: `{ "compactor": { "provider": "anthropic", "model": "claude-haiku-5-5", "thinking": "medium" }, "runLimit": 256000 }`
+- `config.json`: `{ "compactor": { "provider": "anthropic", "model": "claude-haiku-5-5", "thinking": "xhigh" }, "runLimit": 256000 }`
   defaults; editable by hand. Missing `runLimit` uses 256000; invalid/nonpositive/noninteger values fail clearly.
+  Existing profile configs retain their explicit effort; only new profiles default to xhigh.
+
+### Recipe conformance and deliberate operational deviations
+
+The static OptChat prompt follows recipe §5 verbatim, renaming Unii→OptChat and unii→talk
+(the persisted reply kind). The device-tools paragraph is omitted because this extension exposes no device tools.
+Compaction tasks, the 512-dash ruler, and too-long retry text follow §4 verbatim.
+New nodes use the restored prompt; persisted nodes are never rebuilt or migrated.
+
+Compactors deliberately send their own system prompt, without OMP's system instructions or tools.
+Turns run on Opus/Codex and compactions on Haiku: prompt caches are per model, so the recipe's
+turn/compaction cache sharing cannot occur here. Sending OMP's roughly 30k-token prompt and tools
+to Haiku would only add input. The compactor's OptChat text is still the verbatim §5 prompt.
+
+Normal starts load the persisted view and do not rebuild it. Missing, corrupt, or unreadable
+view.json triggers a recovery path that reconstructs coverage from the authoritative log and
+built nodes; this deliberately sacrifices cache continuity only after loss/damage.
+
+If all pending compactions fail, a turn may proceed with the recipe-defined
+`(not summarized yet: zoom it)` placeholders rather than block the chat indefinitely.
+Failed nodes are retried at the next message (§4), and additionally after a 10-second
+availability timer even without a new message. Compaction views, unlike turn views,
+stop at the first unbuilt line and never contain placeholders.
+
+Non-tool text longer than 30,000 UTF-16 characters is logged losslessly as consecutive
+messages of the same kind and date, without splitting surrogate pairs. The recipe does not
+specify a chunk size; we use the tool-output character budget. Tool output is still clipped
+head/tail, not split. Existing long messages remain readable through paged zoom.
+
+Our reading of “view passes 128,000 bytes” is the sum of node text sizes (flat
+UTF-8 summary content), excluding `id+n|` labels, separators, and the `<chat>` envelope.
+The same accounting applies to the 64 KB low bound and 16–32 KB compaction view.
+The recipe's node records store `size`, but its prose is ambiguous about framing.
+We deliberately keep existing accounting: framing is a few percent and changing it
+would rewrite an existing profile's view and invalidate its cache continuity.
 
 ## Turn integration (OMP hooks)
 
@@ -90,7 +125,8 @@ well as across runs. Main-agent and opt-in guards remain unchanged.
 Logging (recipe §1, pi-optchat `transcript.ts` `logMessage`/`boundedMessage`): user → `user`; assistant text →
 reply kind; tool calls → `tool` (`name JSON`); tool results → `echo`, head+tail capped to 30,000 chars; displayed
 custom messages → `user` text prefixed `[customType] `, except `async-result` and `irc:incoming` → `work`;
-task/async reports end with `Full chat: zoom("Name")` per agent (preserved inside the cap).
+task/async reports end with `Full chat: zoom("Name")` per agent (preserved inside capped task
+tool output; async/IRC work text is never clipped and instead uses lossless message chunks).
 Hidden custom messages and thinking → not logged.
 
 Agent transcript navigation (recipe §6): `zoom("Name")` accepts a string `id`, renders the OMP transcript

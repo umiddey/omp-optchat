@@ -64,12 +64,14 @@ Or keep plain `omp` as it is and add a short command for the memory one: `alias 
 - Before a turn starts, the previous turn's messages are summarized; that usually takes a few seconds and shows as
   "Waiting for OptChat summaries…".
 
-Summarizer model (default `anthropic/claude-haiku-5-5`, medium effort): edit
+Summarizer model (default `anthropic/claude-haiku-5-5`, xhigh effort for new profiles): edit
 `~/.omp/optchat/<profile>/config.json`:
 
 ```json
-{ "compactor": { "provider": "anthropic", "model": "claude-haiku-5-5", "thinking": "medium" }, "runLimit": 256000, "memories": false }
+{ "compactor": { "provider": "anthropic", "model": "claude-haiku-5-5", "thinking": "xhigh" }, "runLimit": 256000, "memories": false }
 ```
+
+Existing profile configs keep their explicit effort. New prompts affect only newly built nodes; existing tree nodes are never rebuilt.
 
 `runLimit` is a positive integer UTF-8 byte limit for the raw run tail (default 256000, about 64k tokens); long runs refresh their memory view at the latest assistant boundary while retaining the original task and intact assistant/tool-result tail.
 

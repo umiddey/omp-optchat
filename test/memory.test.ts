@@ -429,17 +429,21 @@ test('a new message is summarized without rescanning every built node', async ()
 test('merges that keep failing are queued, so a new message never scans their level of the tree', async () => {
   const dir = mkdtempSync(join(tmpdir(), 'optchat-queue-'));
   // Each 300-byte message is its own line, and merging two needs the compactor, which refuses. The budget keeps the view from merging.
-  const memory = new Memory(dir, async () => { throw new Error('refused'); }, () => {}, 10_000_000, 8, 60_000);
+  let attempts = 0;
+  const memory = new Memory(dir, async () => { attempts++; throw new Error('refused'); }, () => {}, 10_000_000, 8, 60_000);
   const idle = async () => { while (memory.pending || memory.active) await new Promise(resolve => setTimeout(resolve, 5)); };
   try {
     for (let i = 0; i < 200; i++) memory.append('user', `${i} ${'.'.repeat(300)}`);
     await idle();
-    const get = memory.tree.get;
-    let lookups = 0;
-    memory.tree.get = function (this: typeof memory.tree, key) { lookups++; return get.call(this, key); };
+    assert.equal(attempts, 100);
+    // Retrying all failed queued merges now requires their bounded context reads.
+    // Guard the actual forbidden operation: enumerating the entire tree for work.
+    memory.tree.values = () => { throw new Error('scheduler scanned the tree'); };
+    memory.tree.entries = () => { throw new Error('scheduler scanned the tree'); };
+    memory.tree[Symbol.iterator] = () => { throw new Error('scheduler scanned the tree'); };
     memory.append('user', `one more ${'.'.repeat(300)}`);
     await idle();
-    assert.ok(lookups < 100, `${lookups} tree lookups for one new message, with all 100 merges failing`);
+    assert.equal(attempts, 200, 'all failed merges retry at the next message, before the timer');
   } finally { await memory.close(); rmSync(dir, { recursive: true, force: true }); }
 });
 

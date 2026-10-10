@@ -38,6 +38,12 @@ test('fitting lines stop immediately and copied view head is removed', async () 
   streaming = () => { calls++; const stream = ai.createAssistantMessageEventStream(); const message = reply('12+4|user: kept'); queueMicrotask(() => { stream.push({ type: 'done', reason: 'stop', message }); stream.end(); }); return stream; };
   assert.equal(await compressor()(input, new AbortController().signal), 'user: kept'); assert.equal(calls, 1);
 });
+test('a fitting line needs no retry even if it is longer than its source', async () => {
+  let calls = 0;
+  streaming = () => { calls++; const stream = ai.createAssistantMessageEventStream(); const message = reply('user: contextualized decision'); queueMicrotask(() => { stream.push({ type: 'done', reason: 'stop', message }); stream.end(); }); return stream; };
+  assert.equal(await compressor()({ ...input, source: 'user: yes' }, new AbortController().signal), 'user: contextualized decision');
+  assert.equal(calls, 1);
+});
 test('cold parallel prefixes wait for first response, warm prefix proceeds, cancellation leaves promptly', async () => {
   const calls: { answer: () => void; finish: () => void }[] = [];
   streaming = () => {
