@@ -249,7 +249,11 @@ When this exceeds `runLimit`, select the latest assistant in `event.messages`, n
 fire-and-forget `message_end` buffer. Advance only if it is after the current cut. Catch up and flush
 messages before the cut without duplicate logging, wait with the same summaries working message and
 `settle(signal)` as run start, then render a new view. Send notices, one user opening containing the new
-view + moved memories + the original first message content, and the latest assistant plus all following
+view + moved memories + the current message, and the latest assistant plus all following
+tool results/injections unchanged. The current message is the run's first message, unless the user typed
+into the running turn (OMP adds such messages to the same run): then it is the newest user message before
+the cut, and the run's first message lives on only in the view. Otherwise the model would answer a stale
+prompt while the new one sat only in the summaries.
 tool results/injections unchanged. An individual assistant/tool batch can exceed the bound until a newer
 assistant exists: never split tool-use/result pairs or discard the last assistant's thinking.
 Store the cut message, not its array index. Resolve its role + timestamp with `findLastIndex` on every

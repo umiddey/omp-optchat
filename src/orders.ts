@@ -133,18 +133,45 @@ function holds(keep: Keep, restated: string, words: readonly string[]) {
   return words.some(word => NEGATIONS[word] || word === 'zero') || /\b\p{L}+n['’]t\b/u.test(restated) || /\b0\b/.test(restated);
  const acronym = /^\p{Lu}{2,}s?$/u.test(keep.text);
  const singular = acronym ? word.replace(/s$/, '') : word;
- return keep.match === 'word' ? words.includes(word) || (acronym && words.some(candidate => candidate === singular || candidate === singular + 's'))
-  : words.some(v => v === word || distance(v, word) <= 2);
+ if (acronym && words.some(candidate => candidate === singular || candidate === singular + 's')) return true;
+ // Dictation writes names in capitals: "open AI" → OpenAI (the acronym joins a CamelCase word), GROC → Grok and
+ // UITES → "UI test" (4+ letters, one edit from a non-acronym spelling). Short acronyms (CP, PR, OIA) and one acronym
+ // for another (CPUs → GPUs) still fail.
+ if (acronym && new RegExp(`\\p{Ll}${keep.text}(?!\\p{Lu})|(?<!\\p{Lu})${keep.text}\\p{Ll}`, 'u').test(restated)) return true;
+ if (acronym && [word, singular].some(form => spelled(form, restated))) return true;
+ return keep.match === 'word' ? words.includes(word) : words.some(v => v === word || distance(v, word) <= 2);
+}
+const allCaps = (word: string) => /^\p{Lu}{2,}s?$/u.test(word);
+/** `word` (4+ letters, lower case) is one edit from a non-acronym word of `text`, or from two adjacent words joined of
+ * which at least one is not an acronym. */
+function spelled(word: string, text: string) {
+ if (word.length < 4) return false;
+ const runs = text.match(/\p{L}+/gu) ?? [];
+ const candidates = [...runs.filter(run => !allCaps(run)),
+  ...runs.slice(1).flatMap((next, index) => allCaps(runs[index]) && allCaps(next) ? [] : [runs[index] + next])];
+ return candidates.some(candidate => distance(candidate.toLowerCase(), word) <= 1);
 }
 /** Capitalized non-initial words the restatement brings in that neither the source nor the context has: an invented name
  * (OIA → OI, Rappov → a guessed product) fails like a lost one. */
 function invented(source: string, restated: string, context: string): string[] {
- const sourceWords = (source.match(/\p{L}+/gu) ?? []).map(word => word.toLowerCase());
+ const sourceRuns = source.match(/\p{L}+/gu) ?? [];
+ const sourceWords = sourceRuns.map(word => word.toLowerCase());
  const known = new Set([...sourceWords, ...(context.match(/\p{L}+/gu) ?? []).map(word => word.toLowerCase())]);
- // A near spelling of a source word is a correction (gatefoge → Gateforge), not a new name.
- const corrects = (word: string) => word.length >= 5 && sourceWords.some(source => source.length >= 5 && distance(source, word) <= 2);
+ const restatedRuns = restated.match(/\p{L}+/gu) ?? [];
+ // Corrections, not new names: a near spelling of a source word (gatefoge → Gateforge); a non-acronym one edit from a
+ // dictated acronym or two joined source words (GROC → Grok, open AI → OpenAI); an acronym that, joined with a new
+ // lower-case neighbour, is one edit from a source word (UITES → "UI test").
+ const corrects = (run: string) => {
+  const word = run.toLowerCase();
+  if (word.length >= 5 && sourceWords.some(source => source.length >= 5 && distance(source, word) <= 2)) return true;
+  if (!allCaps(run)) return word.length >= 4 && sourceRuns.some((source, index) => distance((allCaps(source) ? source : '').toLowerCase(), word) <= 1
+   || (index > 0 && distance((sourceRuns[index - 1] + source).toLowerCase(), word) <= 1));
+  return restatedRuns.some((candidate, index) => candidate === run && [restatedRuns[index - 1], restatedRuns[index + 1]].some((neighbour, side) =>
+   neighbour !== undefined && !allCaps(neighbour) && !known.has(neighbour.toLowerCase())
+   && sourceRuns.some(source => allCaps(source) && source.length >= 4 && distance(source.toLowerCase(), side ? word + neighbour.toLowerCase() : neighbour.toLowerCase() + word) <= 1)));
+ };
  return tokens(restated).flatMap(({ raw, start }) => start ? [] : (raw.match(/\p{L}+/gu) ?? []).filter(run => /\p{Lu}/u.test(run)
-  && run.length >= 2 && ![run, run.replace(/s$/, ''), `${run}s`].some(form => known.has(form.toLowerCase())) && !corrects(run.toLowerCase())
+  && run.length >= 2 && ![run, run.replace(/s$/, ''), `${run}s`].some(form => known.has(form.toLowerCase())) && !corrects(run)
   && DICTATION[run.toLowerCase()] !== true && SHOUTED[run.toLowerCase()] !== true && CONDITIONS[run.toLowerCase()] !== true))
   .map(run => `invented ${run}`);
 }
@@ -163,6 +190,11 @@ function failing(next: readonly OrderItem[], needed: readonly OrderItem[]): Gap[
   const missing = covering.map(item => missingTokens(wording(source), wording(item))).reduce((best, current) => current.length < best.length ? current : best);
   return missing.length ? [{ source, omitted: false, missing }] : [];
  });
+}
+/** One line for the whole pass: how many entries kept the owner's wording, and which words a rewording would have lost. */
+function keptNote(reasons: readonly string[], total: number) {
+ const lost = [...new Set(reasons.flatMap(reason => reason.split(', ')))];
+ return `Orders: kept ${reasons.length} of ${total} entries in your own wording (a rewording would have lost: ${lost.join(', ')}).`;
 }
 function retryNote(gaps: readonly Gap[]) {
  return `These orders lost wording while being restated. Restate each one again, keeping every listed word, number, path and id; typos and names may be fixed.\n${gaps.map(gap => `msg ${gap.source.from.join(', ')} "${wording(gap.source)}": ${gap.omitted ? 'no item covers it' : `missing ${gap.missing.map(t => JSON.stringify(t)).join(', ')}`}`).join('\n')}`;
@@ -316,7 +348,7 @@ export class Orders {
    }
   }
   const original = this.ledger;
-  const migrated: OrderItem[] = [];
+  const migrated: OrderItem[] = [], kept: string[] = [];
   for (let at = 0; at < original.items.length && !this.stopped; at += BACKFILL_BATCH) {
    const batch = original.items.slice(at, at + BACKFILL_BATCH).map((item, offset) => ({
     ...ledgerItem(item), index: at + offset, sources: item.from.flatMap(id => sources.has(id) ? [sources.get(id)!] : []),
@@ -345,8 +377,7 @@ export class Orders {
      : [...missingTokens(item.text, candidate.order.text, context),
        ...(item.until ? missingTokens(item.until, candidate.order.until!, context) : [])].join(', ');
     if (reason) {
-     fallbacks.push(ledgerItem(item));
-     this.warn(`Orders migration item ${item.index}: kept verbatim (${reason}): ${item.text}`);
+     fallbacks.push(ledgerItem(item)); kept.push(reason);
     } else candidate!.accepted.push(item);
    }
    for (const group of groups) if (group.accepted.length) {
@@ -356,12 +387,14 @@ export class Orders {
    }
    migrated.push(...fallbacks);
   }
-  if (!this.stopped) this.migrated = { through: original.through, items: migrated };
+  if (this.stopped) return;
+  if (kept.length) this.warn(keptNote(kept, original.items.length));
+  this.migrated = { through: original.through, items: migrated };
  }
  private coverLedger(next: (OrderItem & { covers: number[] })[], ledger: Ledger, records: ExtractedOrders[], targets: RetirementEvent[]) {
   const accepted = new Map<number, number>();
   const replaced = new Set<number>();
-  const fallbacks: OrderItem[] = [];
+  const fallbacks: OrderItem[] = [], kept: string[] = [];
   for (let index = 0; index < ledger.items.length; index++) {
    const old = ledger.items[index];
    if (retired(old, targets)) continue;
@@ -380,8 +413,7 @@ export class Orders {
     : [...missingTokens(old.text, candidate.text, context),
       ...(old.until ? missingTokens(old.until, candidate.until!, context) : [])].join(', ');
    if (reason) {
-    fallbacks.push(ledgerItem(old));
-    this.warn(`Orders consolidation item ${index}: kept verbatim (${reason}): ${old.text}`);
+    fallbacks.push(ledgerItem(old)); kept.push(reason);
    } else {
     accepted.set(index, owner!);
     if (replacement) replaced.add(index);
@@ -395,7 +427,7 @@ export class Orders {
    const from = [...new Set([...covered.flatMap(old => old.from), ...item.from.filter(id => freshIds.has(id))])];
    if (from.length) mapped.push(ledgerItem({ ...item, from }));
   }
-  return [...mapped, ...fallbacks];
+  return { mapped: [...mapped, ...fallbacks], kept };
  }
  private async runBackfill() {
   const queue = [...this.backlog.values()].sort((a, b) => a.i - b.i);
@@ -473,7 +505,7 @@ recordAll(scanned: ReadonlyMap<number, readonly OrderDirective[]>, context = '')
     }).filter(item => !retired(item, targets));
     const replacedBy = (previous: OrderItem) => next.some(item => item.from.some(id => records.some(r => r.i === id && r.i > Math.max(...previous.from) && r.orders.some(order => !('retire' in order))))
      && previous.from.some(id => item.text.includes(`(replaces msg ${id})`)));
-    const mapped = this.coverLedger(next, ledger, records, targets);
+    const { mapped, kept } = this.coverLedger(next, ledger, records, targets);
     const fresh = payload.flatMap(r => r.orders.flatMap(order => 'retire' in order ? [] : [{ ...order, from: [r.i], date: r.date }])).filter(order => !retired(order, targets) && !replacedBy(order));
     const needed = fresh;
     const gaps = failing(mapped, needed);
@@ -481,6 +513,7 @@ recordAll(scanned: ReadonlyMap<number, readonly OrderDirective[]>, context = '')
     const final = gaps.length ? substitute(mapped, needed, gaps) : mapped;
     if (failing(final, needed).length) throw Error('Verbatim fallback did not restore coverage.');
     if (gaps.length) this.warn(`Orders consolidation: kept the verbatim wording of ${gaps.length} order(s) that lost conditions after retries (msg ${gaps.map(gap => gap.source.from.join(', ')).join('; ')}).`);
+    if (kept.length) this.warn(keptNote(kept, ledger.items.length));
     const dates = new Map<number, string>();
     for (const item of this.ledger.items) for (const id of item.from) dates.set(id, item.date);
     for (const r of records) if (r.orders.some(order => !('retire' in order))) dates.set(r.i, r.date);

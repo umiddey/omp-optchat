@@ -147,7 +147,7 @@ export default function optchat(pi: ExtensionAPI) {
         if (at >= 0) runFirst = event.messages[at + 1];
       }
       const first = running ? runFirst : lastStart;
-      const at = turnStart(event.messages, first);
+      let at = turnStart(event.messages, first);
       // OMP may insert or rewrite history between requests; anchor the cut like the run's first message.
       const anchor = cut;
       let from = anchor ? event.messages.findLastIndex(message => message.role === anchor.role && message.timestamp === anchor.timestamp) : -1;
@@ -162,6 +162,10 @@ export default function optchat(pi: ExtensionAPI) {
             flush();
             await waitSummaries(m, ctx);
             view = m.render(); orders = m.orders?.render() ?? ''; cut = event.messages[next]; from = next;
+            // Messages typed into a running turn join this run; after the fold the newest of them is the current message,
+            // not the run opener (else the model answers a stale prompt while the new one sits only in the view).
+            const newest = event.messages.findLastIndex((message, index) => index > at && index < next && message.role === 'user');
+            if (newest > at) { at = newest; runFirst = lastStart = event.messages[at]; }
           }
         }
       }

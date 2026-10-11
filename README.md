@@ -77,7 +77,7 @@ Summarizer model (default `anthropic/claude-haiku-5-5`, xhigh effort for new pro
 
 Existing profile configs keep their explicit effort. New prompts affect only newly built nodes; existing tree nodes are never rebuilt.
 
-`runLimit` is a positive integer UTF-8 byte limit for the raw run tail (default 256000, about 64k tokens); long runs refresh their memory view at the latest assistant boundary while retaining the original task and intact assistant/tool-result tail.
+`runLimit` is a positive integer UTF-8 byte limit for the raw run tail (default 256000, about 64k tokens); long runs refresh their memory view at the latest assistant boundary while retaining the current task (the newest message you typed into the run, else its first message) and intact assistant/tool-result tail.
 
 `memories` (default `false`): whether OMP's per-turn memory recall (`<memories>`, e.g. Mnemopi) is sent in OptChat
 sessions. Off, the view and `zoom` are the only memory and each turn start writes about 1k fewer tokens to the cache.
@@ -105,7 +105,10 @@ usual working message.
 Older profiles migrate their current standing-orders ledger once in the background, using source messages
 only to resolve wording. Historical orders already replaced or retired are never extracted again.
 `orders.jsonl` stays untouched; the ledger changes only at the next normal view batch and saves a
-`migrationDone` marker. Explicit item-index coverage prevents silent drops; a failing item stays verbatim.
+`migrationDone` marker. Explicit item-index coverage prevents silent drops; a failing item stays verbatim,
+and one line per pass tells how many entries kept your wording and which words a rewording would have lost.
+Dictated capitals may be corrected (GROC → Grok, "open AI" → OpenAI, UITES → "UI test"); real acronyms
+(CP, PR, OIA) must stay exact.
 
 Standing means an instruction keeps applying beyond the current task. One-off agent assignments,
 action approvals, pushing a particular change, or installing/restarting it are not standing orders.

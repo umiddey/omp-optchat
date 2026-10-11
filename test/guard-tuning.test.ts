@@ -85,3 +85,9 @@ test('all negations share one hard-token group without permitting loss of negati
   expect(missingTokens(`${old} push`, 'push').length).toBeGreaterThan(0);
  }
 });
+test('dictated acronyms may be corrected to the real name; real acronyms still may not change', () => {
+ expect(missingTokens('two sub agents per provider, so to open AI or to GROC', 'two subagents per provider, such as OpenAI or Grok')).toEqual([]);
+ expect(missingTokens('every endpoint needs a UITES', 'every endpoint needs a UI test')).toEqual([]);
+ expect(missingTokens('Watch CP', 'Watch CPU')).toEqual(['CP', 'invented CPU']);
+ expect(missingTokens('Ask the OIA agent', 'Ask the OI agent')).toEqual(['OIA', 'invented OI']);
+});

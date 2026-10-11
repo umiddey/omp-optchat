@@ -47,6 +47,27 @@ test('rollover logs missing message_end prefix and keeps latest assistant and to
     expect(again.messages).toEqual(out.messages);
   });
 });
+test('a fold makes the newest user message of the run the current message, not the run opener', async () => {
+  await harness(100, async (hooks, ctx) => {
+    await hooks.get('message_end')({ message: first }, ctx);
+    await hooks.get('context')({ messages: [first] }, ctx);
+    // The owner types into a running turn: OMP adds the message to the same run (no agent_start).
+    const old = assistant(2, 'EARLIER TALK'), echo = result(3, 'EARLIER RESULT ' + 'x'.repeat(200));
+    const steer: AgentMessage = { role: 'user', content: 'NEWEST OWNER MESSAGE', timestamp: 4 };
+    const latest = assistant(5, 'LATEST TALK'), tail = result(6, 'LATEST RESULT');
+    const messages = [first, old, echo, steer, latest, tail];
+    const out = await hooks.get('context')({ messages }, ctx);
+    const opening = out.messages[0];
+    if (!opening || opening.role !== 'user' || !Array.isArray(opening.content)) throw Error('Missing opening');
+    const last = opening.content.at(-1);
+    expect(last).toEqual({ type: 'text', text: 'NEWEST OWNER MESSAGE' });
+    expect(out.messages.slice(1)).toEqual([latest, tail]);
+    for (const message of [old, echo, steer, latest, tail]) await hooks.get('message_end')({ message }, ctx);
+    const next = result(7, 'small');
+    const again = await hooks.get('context')({ messages: [...messages, next] }, ctx);
+    expect(again.messages).toEqual([...out.messages, next]);
+  });
+});
 test('between cuts the opening is fixed and the tail only appends', async () => {
   await harness(1000, async (hooks, ctx) => {
     await hooks.get('message_end')({ message: first }, ctx); await hooks.get('context')({ messages: [first] }, ctx);
