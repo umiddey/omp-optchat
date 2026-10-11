@@ -24,13 +24,14 @@ import { openMeasurement, readUsageLog } from '../src/measurement.ts';
 
 const ROOT = resolve(import.meta.dir, '..');
 const SETTLE_TIMEOUT_MS = 10 * 60_000;
+const QA_EVALUATOR_PROMPT = 'You are a retrieval quality evaluator. Answer the user\'s question using ONLY the memory context provided in the user message; if the context does not contain the answer, say NOT_FOUND. Be concise.';
 const THINKING_LEVELS = ['off', 'minimal', 'low', 'medium', 'high', 'xhigh', 'max'];
 
 interface FixtureFact { id: string; answer: string; question: string }
 interface Fixture {
   description: string;
   messages: AgentMessage[];
-  expectedOrders: { text: string; kind: string; from: number; expectTokens: string[] }[];
+  expectedOrders: { text: string; kind: string; from: number; expectTokens: string[]; negations?: string[] }[];
   facts: FixtureFact[];
   orderQuestion: { question: string; expect: string };
 }
@@ -54,8 +55,8 @@ async function openRegistry(): Promise<{ registry: ModelRegistry; close: () => v
   return { registry, close: () => authStorage.close() };
 }
 
-interface UsageCount { calls: number; input: number; output: number; cacheRead: number; cacheWrite: number; errors: number; incomplete: number }
-const emptyCount = (): UsageCount => ({ calls: 0, input: 0, output: 0, cacheRead: 0, cacheWrite: 0, errors: 0, incomplete: 0 });
+interface UsageCount { calls: number; input: number; output: number; cacheRead: number; cacheWrite: number; errors: number; pending: number; damaged: number; incomplete: number }
+const emptyCount = (): UsageCount => ({ calls: 0, input: 0, output: 0, cacheRead: 0, cacheWrite: 0, errors: 0, pending: 0, damaged: 0, incomplete: 0 });
 
 function countUsage(count: UsageCount, message: AssistantMessage) {
   count.calls++;
@@ -90,13 +91,22 @@ interface ModeResult {
 /** Ledger semantics check per fixture order: the restated render must carry the order's kind marker and source
  * message id (`<from> [kind`), plus EVERY expected token (case-insensitive). Bare single-word probes can pass an
  * opposite or partial restatement; missing tokens are reported explicitly. */
-function orderChecks(rendered: string, orders: Fixture['expectedOrders']) {
+function orderChecks(rendered: string, orders: Fixture['expectedOrders'], fromMap: readonly (readonly number[])[]) {
   const lower = rendered.toLowerCase();
   return orders.map(order => {
-    const anchor = `${order.from} [${order.kind}`;
-    const missingTokens = [anchor, ...order.expectTokens.map(token => token.toLowerCase())]
-      .filter(needle => !lower.includes(needle));
-    return { expect: `${order.kind} from ${order.from}: ${order.text}`, missingTokens, pass: missingTokens.length === 0 };
+    // The source id in the render is the LOG entry the fixture message landed on in THIS mode, not the fixture index.
+    const logIndex = fromMap[order.from]?.[0];
+    const anchor = logIndex === undefined ? null : `${logIndex} [${order.kind}`;
+    const needles: string[] = order.expectTokens.map(token => token.toLowerCase());
+    // Goals must keep their done-condition (`until:`) and must not gain forbidden phrasing.
+    if (order.kind === 'goal') needles.push('until:');
+    const missingTokens = [
+      ...(anchor === null ? [`source id for message ${order.from} not mapped in this mode`] : [anchor.toLowerCase()]),
+      ...needles.filter(needle => !lower.includes(needle)),
+      ...(order.negations ?? []).filter(word => lower.includes(word.toLowerCase())).map(word => `negation present: ${word}`),
+    ];
+    return { expect: `${order.kind} from message ${order.from}${logIndex !== undefined ? ` (log ${logIndex})` : ''}: ${order.text}`,
+      missingTokens, pass: missingTokens.length === 0 };
   });
 }
 
@@ -158,22 +168,37 @@ async function replayMode(
     clearTimeout(timer);
   }
   // Replay usage comes from the contract instrumentation rows (they include thrown calls and null usage that an
-  // onUsage callback never observes); unresolved starts and thrown/null rows make the mode's usage incomplete.
+  // onUsage callback never observes). Starts and terminals join on the invocation id: calls are distinct ids,
+  // pending is a start whose terminal never landed, and null/thrown mark unknown — the mode is incomplete then.
   const rows = readUsageLog(join(directory, 'usage.jsonl'));
+  if (rows.error !== undefined) { background.incomplete = 1; background.damaged += rows.damaged; }
+  const open = new Map<string, string>();
+  const seen = new Set<string>();
+  let idlessCalls = 0;
   for (const row of rows.rows) {
-    if (row.type === 'background-start') { background.calls++; continue; }
-    background.calls++;
+    if (row.type === 'background-start') {
+      if (typeof row.id === 'string') { seen.add(row.id); open.set(row.id, row.purpose); }
+      else background.incomplete = 1;
+      continue;
+    }
+    if (row.type !== 'background') continue;
+    if (typeof row.id === 'string') { seen.add(row.id); open.delete(row.id); }
+    idlessCalls++;
     const usage = record(row.usage) ? row.usage : {};
     const value = (key: string) => (typeof usage[key] === 'number' && Number.isFinite(usage[key]) ? usage[key] as number : 0);
     background.input += value('input'); background.output += value('output');
     background.cacheRead += value('cacheRead'); background.cacheWrite += value('cacheWrite');
-    if (row.type === 'background' && row.status !== 'ok') background.errors++;
+    if (row.status !== 'ok') background.errors++;
+    if (row.usage === null || row.status === 'thrown') background.incomplete = 1;
   }
-  background.incomplete = (rows.rows.some(row => row.type === 'background-start')
-    || rows.rows.some(row => row.type === 'background' && (row.usage === null || row.status === 'thrown'))) ? 1 : 0;
+  // calls = distinct invocation ids (start+terminal pair counts once); id-less terminals are malformed extras.
+  background.calls = seen.size + idlessCalls;
+  background.pending = open.size;
+  background.damaged += rows.damaged;
+  if (open.size > 0 || rows.error !== undefined) background.incomplete = 1;
   const viewText = memory.render();
   const ordersRendered = memory.orders?.render() ?? '';
-  const orderResults = orderChecks(ordersRendered, fixture.expectedOrders);
+  const orderResults = orderChecks(ordersRendered, fixture.expectedOrders, byMessage);
   const ordersPassed = fixture.expectedOrders.length > 0 && orderResults.every(order => order.pass);
   const qa: ModeResult['qa'] = [];
   const qaUsage = emptyCount();
@@ -182,9 +207,11 @@ async function replayMode(
     const qaModel = registry.find(selected.provider, selected.model);
     if (!qaModel) throw new Error(`Compactor model unavailable: ${selected.provider}/${selected.model}`);
     const ask = async (question: string) => {
-      const context = `${ordersRendered ? `${ordersRendered}\n\n` : ''}${viewText}`;
-      const messages: Message[] = [{ role: 'user', content: `${context}\n\n${question}`, timestamp: Date.now() }];
-      const reply = await streamSimple(qaModel, { systemPrompt: [viewText], messages }, {
+      // The context is delivered exactly once, in the user message (orders ledger, then the rendered view, then the
+      // question); the system prompt is a static evaluator instruction so the view is never billed twice.
+      const context = `${ordersRendered ? `${ordersRendered}\n\n` : ''}${viewText}\n\n${question}`;
+      const messages: Message[] = [{ role: 'user', content: context, timestamp: Date.now() }];
+      const reply = await streamSimple(qaModel, { systemPrompt: [QA_EVALUATOR_PROMPT], messages }, {
         apiKey: await registry.getApiKey(qaModel), sessionId: 'optchat-grouping-qa',
         reasoning: reasoningFor(qaModel, ThinkingLevel.Low),
       }).result();
