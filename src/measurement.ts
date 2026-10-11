@@ -194,6 +194,10 @@ class Jsonl {
   private failures = 0;
   private warned = false;
   constructor(private readonly file: string, private readonly warn: (s: string) => void) {}
+  ensure(): void {
+    try { if (this.fd === undefined) this.open(); }
+    catch (error) { this.failed(error instanceof Error ? error.message : String(error)); }
+  }
   append(value: unknown): void {
     if (this.failures >= 3) return;
     try {
@@ -230,6 +234,8 @@ export function openMeasurement(directory: string, warn: (s: string) => void = c
   try { mkdirSync(directory, { recursive: true, mode: 0o700 }); } catch { /* open() reports it. */ }
   const files = measureFiles(directory);
   const usage = new Jsonl(files.usage, warn), composition = new Jsonl(files.composition, warn);
+  // An empty file means instrumentation ran and made no calls; absence means measurements are unavailable.
+  usage.ensure(); composition.ensure();
   return {
     invoke(meta: InvokeMeta): Span {
       const id = randomUUID();

@@ -1,6 +1,8 @@
-import { appendFileSync, mkdirSync, writeFileSync } from 'node:fs';
+import { appendFileSync, mkdirSync, writeFileSync, unlinkSync, promises as fs } from 'node:fs';
+import type { FileHandle } from 'node:fs/promises';
 import { join } from 'node:path';
 import type { ExtensionAPI, ExtensionContext } from '@oh-my-pi/pi-coding-agent';
+import { lookup } from '@oh-my-pi/pi-coding-agent/config/registry';
 import { record } from '../src/cache.ts';
 import { requestComposition } from '../src/measurement.ts';
 
@@ -15,6 +17,43 @@ import { requestComposition } from '../src/measurement.ts';
 export default function benchObserve(pi: ExtensionAPI) {
   let sequence = 0;
   let dumps = 0;
+  if (process.env.OMP_OPTCHAT_BENCH_COMPACTION_TOKENS) {
+    const threshold = Number(process.env.OMP_OPTCHAT_BENCH_COMPACTION_TOKENS);
+    if (!Number.isSafeInteger(threshold) || threshold <= 0) throw Error('Invalid benchmark compaction threshold');
+    pi.on('session_start', () => {
+      const setting = lookup('compaction.thresholdTokens');
+      if (!setting) throw Error('OMP compaction.thresholdTokens is unavailable');
+      setting.override(pi.pi.settings, threshold);
+    });
+  }
+  // Bun's compiled request-debug logger may lose a FileHandle before explicitly closing it.
+  // Retain handles when used, not by replacing fs.open (compiled imports bind that function early).
+  // Benchmark-only: provider options and payloads stay untouched.
+  if (process.env.OMP_OPTCHAT_BENCH_DUMP && process.env.PI_REQ_DEBUG === '1') {
+    const handles = new Set<FileHandle>();
+    let restore = () => {};
+    pi.on('session_start', async () => {
+      const path = join(process.env.OMP_OPTCHAT_BENCH_DUMP!, '.handle-probe');
+      mkdirSync(process.env.OMP_OPTCHAT_BENCH_DUMP!, { recursive: true, mode: 0o700 });
+      const sample = await fs.open(path, 'w', 0o600);
+      const prototype = Object.getPrototypeOf(sample) as FileHandle;
+      await sample.close(); unlinkSync(path);
+      const write = prototype.write, writeFile = prototype.writeFile, close = prototype.close;
+      prototype.write = function (this: FileHandle, ...args: unknown[]) {
+        handles.add(this); return Reflect.apply(write, this, args);
+      } as FileHandle['write'];
+      prototype.writeFile = function (this: FileHandle, ...args: unknown[]) {
+        handles.add(this); return Reflect.apply(writeFile, this, args);
+      } as FileHandle['writeFile'];
+      prototype.close = async function (this: FileHandle) {
+        try { await close.call(this); } finally { handles.delete(this); }
+      };
+      restore = () => { prototype.write = write; prototype.writeFile = writeFile; prototype.close = close; };
+    });
+    pi.on('session_shutdown', async () => {
+      try { await Promise.all([...handles].map(handle => handle.close())); } finally { restore(); }
+    });
+  }
   pi.on('before_provider_request', (event, ctx: ExtensionContext) => {
     if (!record(event.payload)) return undefined;
     const payload = event.payload;

@@ -43,6 +43,18 @@ test('consolidation only at batch; persisted ledger loads without consolidating'
   await restored.settle(); expect(restored.render()).toBe(rendered); await restored.close();
  }, async task => { calls++; return consolidate(task, new AbortController().signal); });
 });
+test('an order scanned after its batch boundary survives restart and enters the next ledger', async () => {
+ await fixture(async (o, dir) => {
+  await o.batch(32);
+  seed(o, 24, [{ text: 'Never push', kind: 'rule' }]);
+  await o.close();
+  const restored = new Orders(dir, consolidate, () => {});
+  try {
+   await restored.batch(33);
+   expect(restored.render()).toContain('Never push');
+  } finally { await restored.close(); }
+ });
+});
 test('opening orders precede chat and remain byte identical between batches', async () => {
  await fixture(async o => {
   seed(o, 0, [{ text: 'Never push', kind: 'rule' }]); await o.batch(0); const prefix = o.render();

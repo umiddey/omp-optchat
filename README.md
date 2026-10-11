@@ -188,6 +188,56 @@ Design and cache contract: [DESIGN.md](DESIGN.md). Cache check on real traffic: 
 any OMP session (main plus every subagent, misses with their likely cause):
 `bun scripts/cache-report.ts [session.jsonl | cwd]`.
 
+### Usage measurements
+
+OptChat records background model calls in the profile's `usage.jsonl`: each summary attempt (including
+length retries), orders backfill, migration and consolidation has a start and a terminal row linked by id.
+Terminal rows include model, purpose, duration, status and provider-reported input/output/cache tokens.
+The recorded `usage.cost` is pi-ai's catalog-priced USD estimate, not an invoice or subscription-quota measurement.
+Thrown requests and failed responses without reported usage have `usage: null`, not a fabricated zero.
+An unmatched start means accounting is still pending; these logs do not reconstruct costs from older sessions.
+
+`request-composition.jsonl` records each foreground and background request's tools, system prompt, orders,
+view, memories, history and other serialized UTF-8 bytes. Their sum equals the serialized payload size.
+Per-block token estimates use **bytes / 4**, not provider tokenization; provider-reported token counters remain
+in the usage records and OMP session journal. History includes message envelopes; other includes residual JSON structure
+and provider parameters. Measurements do not enter the model prompt or alter the request.
+
+Set `OMP_OPTCHAT_MEASURE_DIR=<directory>` to put both files outside the profile. Files are append-only,
+contain metadata/counts rather than prompt bodies, and may include truncated provider error messages.
+Logging failures warn without disabling chat; missing, damaged or unfinished accounting must be reported
+as incomplete rather than treated as free usage.
+
+### Matched benchmarks and grouping experiment
+
+```sh
+# Same four-turn task, models and isolated baseline in native OMP and OptChat.
+bun scripts/bench.ts --mode both --model anthropic/claude-haiku-5-5 \
+  --compactor anthropic/claude-haiku-5-5 --thinking medium --out /tmp/optchat-bench-new
+
+# Read foreground, background and request-composition accounting.
+bun scripts/bench-report.ts /tmp/optchat-bench-new --json /tmp/optchat-bench-report.json
+
+# Experimental replay only; never changes the production profile or tree format.
+bun scripts/grouping-experiment.ts --home /tmp/optchat-grouping-new \
+  --compactor anthropic/claude-haiku-5-5 --thinking medium
+```
+
+Use fresh output paths. Matched runs check factual recall, a standing order on replies and a filesystem
+artifact; an OptChat-only zoom probe runs separately and is excluded from comparative totals.
+`--repetitions N` repeats independent runs; `--workload long --turns N` adds long-context pressure.
+Smoke results are not evidence of long-context savings. A comparison needs matched configuration,
+passing correctness checks and complete foreground/background accounting, including retries.
+Unknown or unfinished calls cannot be treated as free. Native OMP compaction usage is not recorded in its
+session journal; benchmark-only wire capture handles supported response formats and reports gaps explicitly.
+Transient wire dumps can contain authentication headers: benchmark directories are private, and headers
+must be scrubbed before reports are retained or shared. Do not run benchmarks on a private/live profile.
+
+The grouping experiment compares message-level logging with assistant-tool-call/result units, preserving
+source-id mapping and user/steering boundaries. It reports exact logged-source retrieval, ledger rule/goal
+preservation and live questions answered from the compressed context separately. Fewer calls are not a
+success if recall or orders degrade. Grouping is not enabled in production.
+
 Release: bump `version` in `package.json`, commit and push, then `gh release create v<version> --generate-notes`.
 Publishing the GitHub release runs `.github/workflows/publish.yml`, which tests and publishes to npm (trusted
 publishing, no token).

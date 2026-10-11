@@ -1,6 +1,6 @@
-import { test, mock } from 'bun:test';
+import { test, mock, afterAll } from 'bun:test';
 import assert from 'node:assert/strict';
-import { mkdirSync, mkdtempSync, readFileSync, writeFileSync } from 'node:fs';
+import { mkdirSync, mkdtempSync, readFileSync, writeFileSync, rmSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import * as ai from '@oh-my-pi/pi-ai';
@@ -19,7 +19,9 @@ const registry = { find: () => model, getApiKey: async () => 'synthetic' } as un
 const usage = { input: 3, output: 5, cacheRead: 7, cacheWrite: 11, totalTokens: 26, cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0, total: 0 } };
 const reply = (text: string): ai.AssistantMessage => ({ role: 'assistant', content: [{ type: 'text', text }], api: model.api, provider: model.provider, model: model.id, timestamp: 0, stopReason: 'stop', usage });
 const utf8 = (value: unknown) => Buffer.byteLength(JSON.stringify(value), 'utf8');
-const scratch = () => mkdtempSync(join(tmpdir(), 'optchat-measure-'));
+const scratchDirs: string[] = [];
+const scratch = () => { const dir = mkdtempSync(join(tmpdir(), 'optchat-measure-')); scratchDirs.push(dir); return dir; };
+afterAll(() => { for (const dir of scratchDirs) rmSync(dir, { recursive: true, force: true }); });
 const input = { context: '<chat>\n</chat>', source: 'user: hi', part: { l: 2, i: 7 }, scan: [28, 29] };
 const done = (message: ai.AssistantMessage) => { const stream = ai.createAssistantMessageEventStream(); queueMicrotask(() => { stream.push({ type: 'done', reason: 'stop', message }); stream.end(); }); return stream; };
 
@@ -213,9 +215,8 @@ test('background composition reads the payload as sent, after the cache split, w
   assert.equal(row.tokenEstimateMethod, 'utf8-bytes/4');
   // The cache transform mutates the payload in place and returns it, so `sent` is the same object as `wire`.
   assert.equal(sent, wire);
-  // The row still accounts exactly the view's own bytes even though the transform split it into pieces.
-  assert.equal(wire.messages[0].content.length, 2);
-  assert.equal(row.blocks.view.bytes, Buffer.byteLength(context, 'utf8'));
+  // View attribution includes its serialized wire blocks (escaping, block fields and cache marks).
+  assert.equal(row.blocks.view.bytes, wire.messages[0].content.reduce((sum, block) => sum + utf8(block), 0));
   assert.equal(row.blocks.system.bytes, utf8([{ type: 'text', text: 'sys' }]));
   assert.equal(row.totalBytes, utf8(sent));
   const sum = Object.values(row.blocks).reduce((total, block) => total + block.bytes, 0);
@@ -241,16 +242,16 @@ test('composition classification: anthropic system/messages/tools and openai dev
   const composition = requestComposition(payload, view);
   assert.equal(composition.totalBytes, utf8(payload));
   assert.equal(Object.values(composition.blocks).reduce((total, block) => total + block.bytes, 0), composition.totalBytes);
-  assert.equal(composition.blocks.view.bytes, Buffer.byteLength(view, 'utf8'));
+  assert.equal(composition.blocks.view.bytes, utf8(payload.messages[0].content[1]));
   assert.equal(composition.blocks.orders.bytes, utf8(ordersBlock));
   assert.equal(composition.blocks.memories.bytes, utf8(memoriesBlock));
   assert.equal(composition.blocks.tools.bytes, utf8(payload.tools));
   assert.equal(composition.blocks.system.bytes, utf8(payload.system));
   const messageBytes = utf8(payload.messages[0]) + utf8(payload.messages[1]);
-  assert.equal(composition.blocks.history.bytes, messageBytes - utf8(ordersBlock) - Buffer.byteLength(view, 'utf8') - utf8(memoriesBlock));
+  assert.equal(composition.blocks.history.bytes, messageBytes - utf8(ordersBlock) - utf8(payload.messages[0].content[1]) - utf8(memoriesBlock));
   for (const block of Object.values(composition.blocks)) assert.equal(block.estimatedTokens, Math.floor(block.bytes / 4));
   // Without the view text, the single unsplit view block is still found by its opening marker.
-  assert.equal(requestComposition(payload).blocks.view.bytes, Buffer.byteLength(view, 'utf8'));
+  assert.equal(requestComposition(payload).blocks.view.bytes, utf8(payload.messages[0].content[1]));
   const openai = {
     model: 'fixture',
     instructions: 'top-level instructions',
@@ -266,7 +267,7 @@ test('composition classification: anthropic system/messages/tools and openai dev
   assert.equal(openaiComposition.totalBytes, utf8(openai));
   assert.equal(Object.values(openaiComposition.blocks).reduce((total, block) => total + block.bytes, 0), openaiComposition.totalBytes);
   assert.equal(openaiComposition.blocks.system.bytes, utf8(openai.input[0]) + utf8(openai.input[1]) + utf8('top-level instructions'));
-  assert.equal(openaiComposition.blocks.view.bytes, Buffer.byteLength(view, 'utf8'));
+  assert.equal(openaiComposition.blocks.view.bytes, utf8(openai.input[2].content[0]));
   assert.equal(openaiComposition.blocks.tools.bytes, utf8(openai.tools));
   assert.ok(openaiComposition.blocks.history.bytes > 0);
   assert.equal(openaiComposition.blocks.orders.bytes, 0);
@@ -291,17 +292,19 @@ test('composition classification: anthropic system/messages/tools and openai dev
   assert.equal(requestComposition(stringPayload).blocks.view.bytes, utf8(view));
 });
 
-test('main requests get composition rows with purpose main, provider and model', () => {
+test('main request measurement preserves payload bytes and cache marks while recording composition', () => {
   const dir = scratch(), files = measureFiles(dir), measure = openMeasurement(dir);
-  const payload = { model: 'fixture', system: [{ type: 'text', text: 'sys' }], messages: [{ role: 'user', content: [{ type: 'text', text: '<chat>\n</chat>' }] }] };
+  const payload = { model: 'fixture', system: [{ type: 'text', text: 'sys', cache_control: { type: 'ephemeral', ttl: '1h' } }], messages: [{ role: 'user', content: [{ type: 'text', text: '<chat>\n</chat>', cache_control: { type: 'ephemeral', ttl: '1h' } }] }] };
+  const before = JSON.stringify(payload);
   measure.request(payload, { provider: 'fixture', id: 'fixture' }, '<chat>\n</chat>');
+  assert.equal(JSON.stringify(payload), before, 'telemetry must not invalidate the prompt cache');
   measure.close();
   const rows = readCompositionLog(files.composition).rows;
   assert.equal(rows.length, 1);
   assert.equal(rows[0].purpose, 'main');
   assert.equal(rows[0].provider, 'fixture');
   assert.equal(rows[0].model, 'fixture');
-  assert.equal(rows[0].blocks.view.bytes, Buffer.byteLength('<chat>\n</chat>', 'utf8'));
+  assert.equal(rows[0].blocks.view.bytes, utf8(payload.messages[0].content[0]));
   assert.equal(rows[0].totalBytes, utf8(payload));
 });
 
@@ -353,5 +356,11 @@ test('readers skip damaged lines and count them', () => {
   const missing = readUsageLog(join(dir, 'absent.jsonl'));
   assert.deepEqual(missing.rows, []);
   assert.equal(missing.damaged, 0);
-  assert.match(missing.error!, /No such file/);
+  assert.ok(missing.error, 'missing telemetry is explicitly incomplete');
+});
+
+test('a measured session with no background calls is distinguishable from missing accounting', () => {
+  const dir = scratch(), measurement = openMeasurement(dir);
+  measurement.close();
+  assert.deepEqual(readUsageLog(measureFiles(dir).usage), { rows: [], damaged: 0 });
 });

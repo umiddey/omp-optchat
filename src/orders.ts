@@ -464,13 +464,18 @@ export class Orders {
 /** Records each scanned user message before its summary node is written. Hard-token loss falls back to the user's words;
  * the compaction view corroborates ordinary capitalized names. */
 recordAll(scanned: ReadonlyMap<number, readonly OrderDirective[]>, context = '') {
+  let late = false;
   for (const [i, orders] of scanned) {
    const date = this.unscanned.get(i);
    if (this.records.has(i) || date === undefined) continue;
    const record: ExtractedOrders = { i, date, orders: orders.map(order => guarded('retire' in order ? order : standing(order), context)) };
    appendJson(join(this.directory, 'orders.jsonl'), record);
    this.records.set(i, record); this.unscanned.delete(i); this.backlog.delete(i); this.open.add(i);
+   if (i <= this.ledger.through) late = true;
   }
+  // An unused summary ancestor can scan a message after its batch was published. The record is durable, but its id
+  // is behind `through`, so restart cannot infer that it is still open. Persist that membership without republishing.
+  if (late) this.writeLedger(this.pendingThrough === undefined ? {} : { pending: this.pendingThrough });
  }
  /** Synchronously rewrites ledger.json: the current ledger plus optional extras. A batch's `pending` marker must be on
   * disk before the merge that requested it can save the view, so this never waits. */
