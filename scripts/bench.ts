@@ -92,14 +92,14 @@ function longWorkload(turnCount: number, padBytes: number, codeword = 'FALCON-7'
 interface Args {
   mode: 'native' | 'optchat' | 'both'; model?: string; compactor: { provider: string; model: string; thinking: string };
   repetitions: number; out: string; workload: 'smoke' | 'long'; turns: number; runLimit?: number;
-  backgroundWaitMs: number; promptTimeoutMs: number; omp: string;
+  backgroundWaitMs: number; promptTimeoutMs: number; omp: string; wireDebug: boolean; compactionThreshold?: number;
 }
 
 function parseArgs(argv: string[]): Args {
   const args: Args = {
     mode: 'both', compactor: { provider: 'anthropic', model: 'claude-haiku-5-5', thinking: 'xhigh' },
     repetitions: 1, out: join('/tmp', `optchat-bench-${new Date().toISOString().replace(/[:.]/g, '-')}`),
-    workload: 'smoke', turns: 36, backgroundWaitMs: 120_000, promptTimeoutMs: 300_000, omp: 'omp',
+    workload: 'smoke', turns: 36, backgroundWaitMs: 120_000, promptTimeoutMs: 300_000, omp: 'omp', wireDebug: false,
   };
   for (let i = 0; i < argv.length; i++) {
     const value = () => { const v = argv[++i]; if (v === undefined) throw new Error(`${argv[i - 1]} needs a value`); return v; };
@@ -115,6 +115,8 @@ function parseArgs(argv: string[]): Args {
     else if (argv[i] === '--background-wait') args.backgroundWaitMs = Number(value());
     else if (argv[i] === '--prompt-timeout') args.promptTimeoutMs = Number(value());
     else if (argv[i] === '--omp') args.omp = value();
+    else if (argv[i] === '--wire-debug') args.wireDebug = true;
+    else if (argv[i] === '--compaction-threshold') { const n = Number(value()); if (!Number.isSafeInteger(n) || n <= 0) throw new Error('--compaction-threshold needs a positive integer token count'); args.compactionThreshold = n; }
     else throw new Error(`Unknown flag ${argv[i]}`);
   }
   if (!Number.isSafeInteger(args.repetitions) || args.repetitions < 1) throw new Error('--repetitions must be >= 1');
@@ -178,19 +180,27 @@ class RpcSession {
   close() { try { this.proc.stdin.end(); } catch { /* already closed */ } }
 }
 
-const REQ_DEBUG_MARKER = 'structured handoff summary for another LLM';
-const REQ_DEBUG_ENV = 'PI_REQ_DEBUG';
+const HANDOFF_TEMPLATE_MARKER = '[What should happen next]';
+const SERIALIZED_USER_END = '[user:end]';
+const COMPACTION_STOP = 'compaction';
 export interface WireUsage { requests: number; input: number; output: number; cacheRead: number; cacheWrite: number; costUsd: number; unpriced: number }
 
 /** Wire-level capture over pi-ai's request-debug hook (PI_REQ_DEBUG=1 wraps EVERY streamSimple fetch, including
  * native compaction side streams the session journal never records). Native runs only — OptChat background is
  * already instrumented by the measurement module. Each rr-session-N.json request dump is sanitized immediately
  * after parse (its headers carry credentials and are never persisted or published); responses are raw SSE in
- * rr-session-N.res.log, and Anthropic compaction usage comes from message_start + message_delta usage counters.
- * Classification is the exact compaction system prompt source: the renderer of
- * pi-agent-core compaction-summary.md opens with the marker below and compaction requests carry no tools array. */
+ * rr-session-N.res.log, and Anthropic usage comes from message_start + message_delta counters.
+ * Classification (validated against real proof artifacts /tmp/optchat-native-compaction-proof):
+ * - native/remote compaction: the RESPONSE stop_reason is `compaction` (AnthropicCompaction side stream);
+ * - handoff compaction: the request's last user message carries the handoff summary template placeholder
+ *   `[What should happen next]` (compaction.ts renders the full conversation into that template);
+ * - memory-extractor side calls (no tools, `[user:end]` serialization): journaled by the session as model_usage
+ *   (`memory`) — counted separately and EXCLUDED from spend, so token costs are never double counted;
+ * - everything else is a main/other wire request, counted only for the wire/session cross-check. */
 class ReqDebugCapture {
   private readonly usage: Required<WireUsage> = { requests: 0, input: 0, output: 0, cacheRead: 0, cacheWrite: 0, costUsd: 0, unpriced: 0 };
+  totalRequests = 0;
+  journaledWireRequests = 0;
   constructor(private readonly cwd: string, private readonly registry: import('@oh-my-pi/pi-coding-agent').ModelRegistry | undefined) {}
   /** Parse every rr-session dump in the run cwd, sanitize request headers in place, extract compaction usage. */
   harvest(): Required<WireUsage> {
@@ -207,28 +217,28 @@ class ReqDebugCapture {
         const { headers: _headers, ...sanitized } = dump;
         writeFileSync(requestPath, JSON.stringify(sanitized, null, 2) + '\n');
       }
+      this.totalRequests++;
       const bodyText = typeof dump.bodyText === 'string' ? dump.bodyText
         : typeof dump.body === 'string' ? dump.body : undefined;
-      if (bodyText === undefined) continue;
-      let body: Record<string, unknown>;
-      try {
-        const parsedBody: unknown = JSON.parse(bodyText);
-        if (!record(parsedBody)) continue;
-        body = parsedBody;
-      } catch { continue; }
-      const system = body.system;
-      const systemText = typeof system === 'string' ? system
-        : Array.isArray(system) ? system.filter(record).map(block => block.type === 'text' && typeof block.text === 'string' ? block.text : '').join('\n') : '';
-      const isCompaction = systemText.includes(REQ_DEBUG_MARKER) && !Array.isArray(body.tools);
-      if (!isCompaction) continue;
       const responseLog = requestPath.replace(/\.json$/, '.res.log');
-      if (!existsSync(responseLog)) continue;
-      const usage = parseAnthropicSseUsage(readFileSync(responseLog, 'utf8'));
+      const response = responseLog && existsSync(responseLog) ? readFileSync(responseLog, 'utf8') : undefined;
+      let body: Record<string, unknown> | undefined;
+      if (bodyText !== undefined) {
+        try {
+          const parsedBody: unknown = JSON.parse(bodyText);
+          if (record(parsedBody)) body = parsedBody;
+        } catch { body = undefined; }
+      }
+      const kind = this.classify(body, response);
+      if (kind === 'main') continue;
+      if (kind === 'journaled') { this.journaledWireRequests++; continue; }
+      if (!response) continue;
+      const usage = parseAnthropicSseUsage(response);
       if (!usage) continue;
       this.usage.requests++;
       this.usage.input += usage.input; this.usage.output += usage.output;
       this.usage.cacheRead += usage.cacheRead; this.usage.cacheWrite += usage.cacheWrite;
-      const modelId = typeof body.model === 'string' ? body.model : undefined;
+      const modelId = body && typeof body.model === 'string' ? body.model : undefined;
       const slash = modelId ? modelId.indexOf('/') : -1;
       const model = this.registry && modelId && slash > 0
         ? this.registry.find(modelId.slice(0, slash), modelId.slice(slash + 1))
@@ -242,12 +252,30 @@ class ReqDebugCapture {
     }
     return { ...this.usage };
   }
+
+  /** Wire-level call class from the sanitized request body and the raw SSE response. */
+  private classify(body: Record<string, unknown> | undefined, response: string | undefined): 'compaction' | 'journaled' | 'main' {
+    if (response && /"stop_reason":"compaction"/.test(response)) return 'compaction';
+    const lastUser = body && Array.isArray(body.messages)
+      ? body.messages.filter(record).filter(message => message.role === 'user').at(-1)
+      : undefined;
+    const content = lastUser && record(lastUser) ? lastUser.content : undefined;
+    const text = typeof content === 'string' ? content
+      : Array.isArray(content) ? content.filter(record).map(block => block.type === 'text' && typeof block.text === 'string' ? block.text : '').join('\n') : '';
+    if (text.includes(HANDOFF_TEMPLATE_MARKER)) return 'compaction';
+    const tools = body && Array.isArray(body.tools) ? body.tools : [];
+    if (tools.length === 0 && text.includes(SERIALIZED_USER_END)) return 'journaled';
+    return 'main';
+  }
 }
 
-/** Anthropic SSE usage: message_start carries input/cache counters, the final message_delta carries output_tokens. */
-function parseAnthropicSseUsage(text: string): { input: number; output: number; cacheRead: number; cacheWrite: number } | undefined {
+/** Anthropic SSE usage: message_start carries input/cache counters, the final message_delta carries output_tokens.
+ * Native (AnthropicCompaction) responses instead report per-iteration counters in `usage.iterations` with zeroed
+ * top-level fields — the real billed tokens are the iteration entries, summed. */
+export function parseAnthropicSseUsage(text: string): { input: number; output: number; cacheRead: number; cacheWrite: number } | undefined {
   const num = (value: unknown) => (typeof value === 'number' && Number.isFinite(value) ? value : 0);
   let input = 0, output = 0, cacheRead = 0, cacheWrite = 0, seen = false;
+  let iterations: readonly unknown[] | undefined;
   for (const line of text.split('\n')) {
     if (!line.startsWith('data:')) continue;
     const payload = line.slice(5).trim();
@@ -259,250 +287,22 @@ function parseAnthropicSseUsage(text: string): { input: number; output: number; 
     const usage = record(event.usage) ? event.usage : record(message?.usage) ? message.usage : undefined;
     if (!usage) continue;
     seen = true;
+    if (Array.isArray(usage.iterations)) iterations = usage.iterations;
     input += num(usage.input_tokens);
     output = Math.max(output, num(usage.output_tokens));
     cacheRead += num(usage.cache_read_input_tokens);
     cacheWrite += num(usage.cache_creation_input_tokens);
   }
-  return seen ? { input, output, cacheRead, cacheWrite } : undefined;
-}
-
-/** Bounded wait for background accounting while the RPC process is STILL RUNNING: poll the usage log until its size
- * is stable, so post-turn compactor/order calls (and their retries) finish before stdin closes. Closing first would
- * abort in-flight calls; if the wait still times out, unmatched start rows surface the aborted lifecycle as pending. */
-async function waitForBackground(usageFile: string, deadlineMs: number, stableMs: number) {
-  const started = Date.now();
-  let lastSize = -1, lastChange = Date.now();
-  while (Date.now() - started < deadlineMs) {
-    const size = existsSync(usageFile) ? statSync(usageFile).size : 0;
-    if (size !== lastSize) { lastSize = size; lastChange = Date.now(); }
-    else if (Date.now() - lastChange >= stableMs) return { settled: true, waitedMs: Date.now() - started, bytes: size };
-    const { promise, resolve: wake } = Promise.withResolvers<void>();
-    setTimeout(wake, 500);
-    await promise;
-  }
-  return { settled: false, waitedMs: Date.now() - started, bytes: lastSize < 0 ? 0 : lastSize };
-}
-
-/** The final assistant reply of the turn whose user prompt starts with `promptPrefix`: scan forward from the prompt
- * to the next user boundary and take the last non-empty assistant text inside that span. */
-function replyForTurn(exchanges: SessionExchange[], promptPrefix: string): string | undefined {
-  const at = exchanges.findIndex(exchange => exchange.role === 'user' && exchange.text.startsWith(promptPrefix));
-  if (at < 0) return undefined;
-  let reply: string | undefined;
-  for (let i = at + 1; i < exchanges.length && exchanges[i].role !== 'user'; i++)
-    if (exchanges[i].role === 'assistant' && exchanges[i].text.trim()) reply = exchanges[i].text;
-  return reply;
-}
-
-function evaluateCorrectness(turns: TurnSpec[], sessionFile: string) {
-  const exchanges = sessionExchanges(sessionFile);
-  return turns.flatMap(turn => {
-    const reply = replyForTurn(exchanges, turn.prompt.slice(0, 48));
-    return turn.checks.filter(check => check.kind !== 'artifact').map(check => ({
-      turn: turn.id, kind: check.kind, expect: check.expect,
-      pass: reply !== undefined && check.pattern !== undefined && new RegExp(check.pattern).test(reply),
-      reply: reply?.slice(0, 200),
-    }));
-  });
-}
-
-/** The artifact check runs against the filesystem of the run's own cwd: both modes must create the identical file. */
-function artifactCheck(workload: Workload, cwd: string) {
-  if (!workload.artifact) return [];
-  const file = join(cwd, workload.artifact.file);
-  let actual: string | undefined;
-  try { actual = readFileSync(file, 'utf8').trim(); } catch { actual = undefined; }
-  return [{
-    turn: workload.artifact.turn, kind: 'artifact', expect: workload.artifact.expect,
-    pass: actual === workload.artifact.content, reply: actual === undefined ? 'file missing' : `content: ${actual.slice(0, 100)}`,
-  }];
-}
-
-interface ChildEnv extends Record<string, string> {}
-
-function childEnv(mode: 'native' | 'optchat', home: string, measure: string, dump: string): ChildEnv {
-  const env: ChildEnv = {};
-  for (const [key, value] of Object.entries(process.env)) if (typeof value === 'string') env[key] = value;
-  // Matched isolation: strip every OptChat/measure lifecycle variable the parent shell may carry, then set exactly
-  // this run's values; a globally installed OptChat must never activate the native comparator.
-  for (const key of ['OMP_OPTCHAT', 'OMPCODE', 'OPTCHAT_OBSERVER_DIR', 'OMP_OPTCHAT_MEASURE_DIR',
-    'OMP_OPTCHAT_BENCH_DUMP', 'OMP_OPTCHAT_SETTLE_BUDGET_MS', 'OTEL_EXPORTER_OTLP_ENDPOINT',
-    'OTEL_EXPORTER_OTLP_PROTOCOL', 'OTEL_EXPORTER_OTLP_TRACES_ENDPOINT']) delete env[key];
-  env.OMP_OPTCHAT_HOME = home;
-  env.OMP_OPTCHAT_MEASURE_DIR = measure;
-  if (mode === 'optchat') env.OMP_OPTCHAT = 'bench';
-  else env.OMP_OPTCHAT_BENCH_DUMP = dump;
-  // Native runs only: wire-level capture of every provider fetch, including compaction side streams.
-  if (mode === 'native') env.PI_REQ_DEBUG = '1';
-  return env;
-}
-
-function launch(args: Args, mode: 'native' | 'optchat', cwd: string, sessions: string, env: ChildEnv, log: string) {
-  const extIndex = join(ROOT, 'src', 'index.ts');
-  const observer = join(ROOT, 'scripts', 'bench-observer.ts');
-  const argv = [args.omp, '--mode', 'rpc', '--no-ui', '--no-title', '--no-extensions', '--session-dir', sessions, '-e', observer];
-  // Only explicit -e files load (--no-extensions): native runs load the passive observer alone; optchat runs
-  // additionally load this worktree's extension.
-  if (mode === 'optchat') argv.push('-e', extIndex, '--optchat', 'bench');
-  if (args.model) argv.push('--model', args.model);
-  return Bun.spawn(argv, { cwd, env, stdin: 'pipe', stdout: 'pipe', stderr: Bun.file(log) });
-}
-
-async function runOnce(args: Args, workload: Workload, mode: 'native' | 'optchat', rep: number, outDir: string) {
-  const name = `${mode}-rep${rep}`;
-  const runDir = join(outDir, name);
-  const cwd = join(runDir, 'cwd');
-  // Fresh per-run home: OptChat profile state (log/tree/view/orders) must never leak across reps or modes.
-  const home = join(runDir, 'home');
-  const measure = join(runDir, 'measure');
-  const dump = join(runDir, 'payloads');
-  const sessions = join(runDir, 'sessions');
-  for (const dir of [runDir, cwd, home, measure, dump, sessions]) mkdirSync(dir, { recursive: true, mode: 0o700 });
-  const usageFile = join(measure, 'usage.jsonl');
-  const compositionFile = join(measure, 'request-composition.jsonl');
-  const profile = join(home, 'bench');
-  mkdirSync(profile, { recursive: true, mode: 0o700 });
-  // The profile config is fixed before launch so the extension loads exactly the benchmark compactor.
-  writeFileSync(join(profile, 'config.json'), JSON.stringify({
-    compactor: args.compactor, ...(args.runLimit !== undefined ? { runLimit: args.runLimit } : {}),
-  }, null, 2) + '\n');
-
-  const startedAt = new Date().toISOString();
-  const proc = launch(args, mode, cwd, sessions, childEnv(mode, home, measure, dump), join(runDir, 'rpc.stderr.log'));
-  const rpcLog = join(runDir, 'rpc.jsonl');
-  const rpc = new RpcSession(proc, rpcLog);
-  const promptTimeout = args.promptTimeoutMs;
-  let turnIndex = 0;
-  let background = { settled: true, waitedMs: 0, bytes: 0 };
-  try {
-    await rpc.next('ready', promptTimeout);
-    for (const turn of workload.turns) {
-      turnIndex++;
-      await rpc.prompt(turn.id, turn.prompt, promptTimeout);
-    }
-    // Drain background accounting while the process is alive: closing stdin first would abort in-flight
-    // compactor/order calls. Unresolved starts after this wait surface as pending rows.
-    background = await waitForBackground(usageFile, mode === 'optchat' ? args.backgroundWaitMs : 20_000, 15_000);
-  } finally {
-    rpc.close();
-  }
-  const exit = await proc.exited;
-  // Wire capture harvests AFTER exit: sanitize request dumps (credential headers) then extract compaction usage,
-  // priced through the catalog calculateCost API (catalog-priced estimate, never billed actuals).
-  let wireUsage: Required<WireUsage> | undefined;
-  if (mode === 'native') {
-    const settings = await Settings.init({ cwd });
-    const authStorage = await discoverAuthStorage(undefined, { settings });
-    try {
-      const registry = new ModelRegistry(authStorage);
-      wireUsage = new ReqDebugCapture(cwd, registry).harvest();
-    } finally {
-      authStorage.close();
+  if (!seen) return undefined;
+  if (iterations) {
+    input = 0; output = 0; cacheRead = 0; cacheWrite = 0;
+    for (const iteration of iterations) {
+      if (!record(iteration)) continue;
+      input += num(iteration.input_tokens);
+      output += num(iteration.output_tokens);
+      cacheRead += num(iteration.cache_read_input_tokens);
+      cacheWrite += num(iteration.cache_creation_input_tokens);
     }
   }
-
-  const sessionFiles = readdirSync(sessions).filter(f => f.endsWith('.jsonl')).map(f => join(sessions, f))
-    .filter(f => statSync(f).isFile()).sort((a, b) => statSync(b).mtimeMs - statSync(a).mtimeMs);
-  const sessionFile = sessionFiles[0];
-  const correctness = sessionFile ? [...evaluateCorrectness(workload.turns, sessionFile), ...artifactCheck(workload, cwd)] : [];
-
-  // Noncomparative optchat-only probe: fully isolated side session (own session dir + measure dir + payloads), so
-  // the extra zoom work never enters the matched usage comparison.
-  let probe: { sessionFile?: string; correctness: ReturnType<typeof evaluateCorrectness> } | undefined;
-  if (mode === 'optchat') {
-    const probeSessions = join(runDir, 'probe', 'sessions');
-    const probeMeasure = join(runDir, 'probe', 'measure');
-    const probeDump = join(runDir, 'probe', 'payloads');
-    for (const dir of [probeSessions, probeMeasure, probeDump]) mkdirSync(dir, { recursive: true, mode: 0o700 });
-    const probeProc = launch(args, mode, cwd, probeSessions,
-      childEnv(mode, home, probeMeasure, probeDump), join(runDir, 'probe', 'rpc.stderr.log'));
-    const probeRpc = new RpcSession(probeProc, join(runDir, 'probe', 'rpc.jsonl'));
-    try {
-      await probeRpc.next('ready', promptTimeout);
-      await probeRpc.prompt('probe-zoom', 'Benchmark probe (memory tools). Call zoom with id 0 and n 1, then reply only PROBE_ZOOM_OK plus the standing-order word.', promptTimeout);
-      await waitForBackground(join(probeMeasure, 'usage.jsonl'), args.backgroundWaitMs, 15_000);
-    } catch (error) {
-      console.error(`[${name}] probe failed: ${String(error)}`);
-    } finally {
-      probeRpc.close();
-      await probeProc.exited;
-    }
-    const probeFiles = existsSync(probeSessions)
-      ? readdirSync(probeSessions).filter(f => f.endsWith('.jsonl')).map(f => join(probeSessions, f)).sort((a, b) => statSync(b).mtimeMs - statSync(a).mtimeMs)
-      : [];
-    const probeSessionFile = probeFiles[0];
-    probe = {
-      sessionFile: probeSessionFile,
-      correctness: probeSessionFile
-        ? evaluateCorrectness([{ id: 'probe-zoom', prompt: 'Benchmark probe (memory tools). Call zoom with id 0 and n 1, then reply only PROBE_ZOOM_OK plus the standing-order word.',
-          checks: [{ kind: 'sentinel', pattern: 'PROBE_ZOOM_OK', expect: 'PROBE_ZOOM_OK' }, orderCheck] }], probeSessionFile)
-        : [],
-    };
-  }
-
-  return {
-    name, mode, rep, startedAt, finishedAt: new Date().toISOString(), cwd, sessionFile, usageFile, compositionFile,
-    leakFile: join(measure, 'optchat-leak.jsonl'),
-    payloadsDir: dump, dumpDir: dump, home, wireDir: cwd,
-    wireCompactionUsage: wireUsage,
-    rpcExit: exit, turnsSent: turnIndex,
-    correctness, probe,
-    background,
-    correctnessPassed: correctness.length > 0 && correctness.every(c => c.pass),
-  };
+  return { input, output, cacheRead, cacheWrite };
 }
-
-async function main() {
-  const args = parseArgs(process.argv.slice(2));
-  const workload = args.workload === 'smoke' ? smokeWorkload()
-    : longWorkload(args.turns, Math.max(2000, Math.floor((args.runLimit ?? 256_000) * 1.4 / args.turns)));
-  const outDir = args.out;
-  if (existsSync(outDir)) throw new Error(`--out ${outDir} already exists: benchmark runs require a fresh directory`);
-  mkdirSync(outDir, { recursive: true, mode: 0o700 });
-  const modes = args.mode === 'both' ? ['native', 'optchat'] as const : [args.mode] as const;
-  const manifest: Record<string, unknown> = {
-    config: { ...args, root: ROOT, evidence: args.workload === 'smoke' ? 'smoke — NOT long-context evidence' : 'long-context benchmark' },
-    startedAt: new Date().toISOString(), runs: [],
-  };
-  const runs: Record<string, unknown>[] = [];
-  const reports: RunReport[] = [];
-  for (let rep = 1; rep <= args.repetitions; rep++) {
-    for (const mode of modes) {
-      console.log(`[${mode} rep${rep}] running ${workload.name} workload (${workload.turns.length} turns)…`);
-      const run = await runOnce(args, workload, mode, rep, outDir);
-      runs.push(run);
-      console.log(`[${run.name}] rpc exit ${run.rpcExit}; ${run.turnsSent} turns; session ${run.sessionFile ?? 'MISSING'}`);
-      if (run.wireCompactionUsage) console.log(`[${run.name}] wire compaction requests ${run.wireCompactionUsage.requests} (in ${run.wireCompactionUsage.input}, out ${run.wireCompactionUsage.output}, catalog cost $${run.wireCompactionUsage.costUsd.toFixed(4)}, unpriced ${run.wireCompactionUsage.unpriced})`);
-      const parsedSession = run.sessionFile ? parseSession(run.sessionFile) : undefined;
-      const report = buildRunReport({
-        label: run.name, mode, workload: workload.name,
-        session: parsedSession,
-        background: parseUsageLog(existsSync(run.usageFile) ? run.usageFile : undefined),
-        composition: parseCompositionLog(existsSync(run.compositionFile) ? run.compositionFile : undefined,
-          existsSync(run.leakFile) ? run.leakFile : undefined),
-        backgroundSettled: run.background.settled,
-        nativeCompactionUsage: run.wireCompactionUsage,
-      });
-      reports.push(report);
-      console.log(`[${run.name}] correctness ${run.correctnessPassed ? 'PASS' : 'FAIL'} (${run.correctness.filter(c => c.pass).length}/${run.correctness.length} checks)`);
-      if (run.probe) console.log(`[${run.name}] probe (noncomparative): ${run.probe.correctness.filter(c => c.pass).length}/${run.probe.correctness.length}`);
-      console.log(`[${run.name}] ${report.evidence}; complete: ${report.completeness.complete ? 'yes' : `NO — ${report.completeness.reasons.join('; ')}`}`);
-    }
-  }
-  manifest.runs = runs;
-  manifest.finishedAt = new Date().toISOString();
-  writeFileSync(join(outDir, 'manifest.json'), JSON.stringify(manifest, null, 2) + '\n');
-  const comparisons: RunComparison[] = [];
-  for (let rep = 1; rep <= args.repetitions; rep++) {
-    const native = reports.find(r => r.mode === 'native' && r.label.endsWith(`rep${rep}`));
-    const optchat = reports.find(r => r.mode === 'optchat' && r.label.endsWith(`rep${rep}`));
-    if (native && optchat) comparisons.push({ native: native.label, optchat: optchat.label, ...compareRuns(native, optchat) });
-  }
-  writeFileSync(join(outDir, 'report.json'), JSON.stringify({ generatedAt: new Date().toISOString(), config: manifest.config, runs: reports, comparisons }, null, 2) + '\n');
-  console.log(`\nBenchmark out: ${outDir}\n  manifest.json  report.json  (per-run: rpc.jsonl, sessions/, measure/, payloads/, home/, otlp/)`);
-  console.log(`Workload: ${workload.name} — ${workload.name === 'smoke' ? 'NOT long-context evidence' : 'long-context benchmark'}`);
-  for (const pair of comparisons) console.log(`comparison: ${JSON.stringify(pair)}`);
-}
-
-if (import.meta.main) await main().catch(error => { console.error(error); process.exit(1); });

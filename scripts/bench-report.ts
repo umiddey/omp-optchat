@@ -3,13 +3,16 @@ import { basename, isAbsolute, join, resolve } from 'node:path';
 import { record } from '../src/cache.ts';
 
 /** Report CLI for matched native-OMP vs OptChat benchmark runs and for historical sessions. Parses OMP session JSONL
- * (active branch only, so abandoned branches never double count), the background usage.jsonl (schema1: usage
- * actual|null, purpose, attempt, status, duration, id, provider, model) and request-composition.jsonl (per-class
- * bytes plus a byte/4 estimate). Accounting rules, enforced everywhere below: assistant usage counts once;
- * purpose-classified model_usage entries are comparator costs; native compaction model calls are NOT journaled by
- * OMP 18.8.3 anywhere, so they are counted as events with unknown usage and force an incomplete verdict; null or
- * pending usage propagates incompleteness; no savings claim is ever derived from request counts; absent logs are
- * reported as unrecorded, never fabricated. */
+ * as SPEND: every billable invocation in the file counts once — calls on abandoned branches after a rewind were paid
+ * too, so totals never silently erase them (the active branch walk is used only for correctness ordering, in
+ * sessionExchanges). Background usage.jsonl (schema v2: background-start/background pairs, usage actual|null) and
+ * request-composition.jsonl (per-class bytes plus byte/4 estimates) are parsed tolerantly with damaged-line counts
+ * that propagate to completeness. The comparison aggregates foreground + background + native compaction wire usage
+ * (PI_REQ_DEBUG capture: actual SSE token counters, catalog-priced USD estimate) into one spend total per side.
+ * Eligibility for a comparison demands: complete accounting on both sides (no pending/unknown/damaged telemetry,
+ * compaction events <= wire-captured requests, unpriced calls unknown), correctness PASS on both sides, and equal
+ * run identity (model/compactor/workload shape) — request counts are never a savings basis, and catalog-priced USD
+ * is labeled an estimate, never billed actuals. */
 
 export interface UsageTotals {
   calls: number; callsWithUsage: number; input: number; output: number;
@@ -17,24 +20,36 @@ export interface UsageTotals {
 }
 export interface SessionPurpose extends UsageTotals { role?: string; provider?: string; model?: string }
 export interface ParsedSession {
-  sessionFile: string; branchResolution: 'branch' | 'linear';
+  sessionFile: string;
+  /** Unparseable JSONL lines, counted and skipped — never silently dropped. */
+  damaged: number;
+  /** Unreflected rewind forks in the file (informational; spend counts every branch regardless). */
+  branchy: boolean;
   main: UsageTotals;
   modelUsage: Record<string, SessionPurpose>;
-  compaction: { events: number; branchSummaries: number; tokensBefore: number[]; usageKnown: false };
+  compaction: { events: number; branchSummaries: number; tokensBefore: number[] };
   requests: number;
   totals: UsageTotals;
 }
 export interface CompositionLog {
-  recorded: boolean; file?: string; requests: number; leaks: number;
+  recorded: boolean; file?: string; requests: number; leaks: number; damaged: number;
   classes: Record<string, number>; bytesTotal: number; tokensEstimate: number;
   purposes: Record<string, { requests: number; bytesTotal: number }>;
 }
+export interface RunIdentity {
+  model?: string; compactor?: string; thinking?: string;
+  workload?: string; turns?: number; runLimit?: number;
+}
 export interface RunReport {
   label: string; mode: 'native' | 'optchat' | 'unknown'; workload: string;
+  identity?: RunIdentity;
   session: ParsedSession | undefined; background: UsageLog; composition: CompositionLog;
   backgroundSettled: boolean;
   nativeCompactionUsage?: WireCompactionUsage;
+  correctnessPassed?: boolean;
   completeness: { complete: boolean; reasons: string[] };
+  /** Informational, not a failure: compaction tokens are actual wire counters, USD is a catalog-priced estimate. */
+  pricingNote?: string;
   evidence: string;
   savingsClaim: string;
   requests: number;
@@ -58,20 +73,31 @@ const addInto = (into: UsageTotals, from: UsageTotals) => {
 
 interface SessionEntryLike { type?: string; id?: unknown; parentId?: unknown; message?: unknown; purpose?: unknown; role?: unknown; model?: unknown; provider?: unknown; usage?: unknown; stopReason?: unknown; errorMessage?: unknown; tokensBefore?: unknown; timestamp?: unknown }
 
-function entriesOf(file: string): { entries: SessionEntryLike[] } {
+function entriesOf(file: string): { entries: SessionEntryLike[]; damaged: number } {
   const lines = readFileSync(file, 'utf8').split('\n');
   const entries: SessionEntryLike[] = [];
+  let damaged = 0;
   for (const line of lines) {
     if (!line.trim()) continue;
     let value: unknown;
-    try { value = JSON.parse(line); } catch { continue; }
+    try { value = JSON.parse(line); } catch { damaged++; continue; }
     if (record(value)) {
       // Read-model cast: parsed JSON has no static shape; SessionEntryLike types only the fields read below,
       // and every consumption site re-checks its field with typeof guards.
       entries.push(value as SessionEntryLike);
-    }
+    } else damaged++;
   }
-  return { entries };
+  return { entries, damaged };
+}
+
+/** Whether the file carries any fork (an entry referenced by more than one child) — informational only. */
+function entriesOfIsBranchy(entries: readonly SessionEntryLike[]): boolean {
+  const childCounts = new Map<string, number>();
+  for (const entry of entries)
+    if (typeof entry.parentId === 'string' && entry.type === 'message')
+      childCounts.set(entry.parentId, (childCounts.get(entry.parentId) ?? 0) + 1);
+  for (const count of childCounts.values()) if (count > 1) return true;
+  return false;
 }
 
 /** Walk leaf→root over the parentId tree and return the active branch in append order. The active leaf is the
@@ -117,18 +143,19 @@ const billed = (usage: unknown): usage is Record<string, unknown> =>
   record(usage) && (typeof usage.input === 'number' || typeof usage.output === 'number'
     || typeof usage.cacheRead === 'number' || typeof usage.cacheWrite === 'number');
 
-/** Parse one OMP session file into purpose-classified usage totals. */
+/** Parse one OMP session file into purpose-classified spend totals: EVERY billable entry in file order counts once —
+ * rewind-abandoned branches were paid too. Correctness ordering uses sessionExchanges (active chain) instead. */
 export function parseSession(file: string): ParsedSession {
-  const { entries } = entriesOf(file);
-  const { branch, resolution } = activeBranchWithUsage(entries);
+  const { entries, damaged } = entriesOf(file);
   const parsed: ParsedSession = {
-    sessionFile: resolve(file), branchResolution: resolution,
+    sessionFile: resolve(file), damaged,
+    branchy: entriesOfIsBranchy(entries),
     main: emptyTotals(),
     modelUsage: {},
-    compaction: { events: 0, branchSummaries: 0, tokensBefore: [], usageKnown: false },
+    compaction: { events: 0, branchSummaries: 0, tokensBefore: [] },
     requests: 0, totals: emptyTotals(),
   };
-  for (const entry of branch) {
+  for (const entry of entries) {
     if (entry.type === 'message') {
       const message = record(entry.message) ? entry.message : undefined;
       if (!message || message.role !== 'assistant') continue;
@@ -155,16 +182,17 @@ export function parseSession(file: string): ParsedSession {
       if (typeof entry.tokensBefore === 'number') parsed.compaction.tokensBefore.push(entry.tokensBefore);
     }
   }
+  void 0;
   addInto(parsed.totals, parsed.main);
   for (const bucket of Object.values(parsed.modelUsage)) addInto(parsed.totals, bucket);
   return parsed;
 }
 
-const EMPTY_USAGE: UsageLog = { recorded: false, purposes: {}, attempts: 0, pending: 0, failed: 0, unknown: 0, durationMs: 0 };
+const EMPTY_USAGE: UsageLog = { recorded: false, purposes: {}, attempts: 0, pending: 0, failed: 0, unknown: 0, durationMs: 0, damaged: 0 };
 
 export interface UsageLog {
   recorded: boolean; file?: string; purposes: Record<string, UsageTotals & { attempts: number; failed: number; durationMs: number }>;
-  attempts: number; pending: number; failed: number; unknown: number; durationMs: number;
+  attempts: number; pending: number; failed: number; unknown: number; durationMs: number; damaged: number;
 }
 
 /** Parse a background usage.jsonl per the settled measurement contract: `background-start`/`background` row pairs
@@ -174,26 +202,26 @@ export interface UsageLog {
  * history. */
 export function parseUsageLog(file: string | undefined): UsageLog {
   if (!file || !existsSync(file)) return { ...EMPTY_USAGE, purposes: {} };
-  const log: UsageLog = { recorded: true, file: resolve(file), purposes: {}, attempts: 0, pending: 0, failed: 0, unknown: 0, durationMs: 0 };
+  const log: UsageLog = { recorded: true, file: resolve(file), purposes: {}, attempts: 0, pending: 0, failed: 0, unknown: 0, durationMs: 0, damaged: 0 };
   const bucket = (purpose: string) => log.purposes[purpose] ??= { ...emptyTotals(), attempts: 0, failed: 0, durationMs: 0 };
   const open = new Map<string, string>();
   for (const line of readFileSync(file, 'utf8').split('\n')) {
     if (!line.trim()) continue;
     let value: unknown;
-    try { value = JSON.parse(line); } catch { continue; }
-    if (!record(value)) continue;
+    try { value = JSON.parse(line); } catch { log.damaged++; continue; }
+    if (!record(value)) { log.damaged++; continue; }
     const purpose = typeof value.purpose === 'string' && value.purpose ? value.purpose : 'unclassified';
     const id = typeof value.id === 'string' ? value.id : '';
     if (value.type === 'background-start') {
       log.attempts++;
       bucket(purpose).attempts++;
       if (id) open.set(id, purpose);
-      else log.pending++;
+      else { log.pending++; bucket(purpose).calls++; }
       continue;
     }
     if (value.type !== 'background') continue;
     const orphanTerminal = !id || !open.has(id);
-    if (orphanTerminal) { log.attempts++; bucket(purpose).attempts++; }
+    if (orphanTerminal) { log.attempts++; bucket(purpose).attempts++; bucket(purpose).calls++; }
     if (id) open.delete(id);
     const duration = typeof value.durationMs === 'number' ? value.durationMs : 0;
     log.durationMs += duration;
@@ -201,29 +229,32 @@ export function parseUsageLog(file: string | undefined): UsageLog {
     if (typeof value.status === 'string' && value.status !== 'ok') { bucket(purpose).failed++; log.failed++; }
     if (record(value.usage) && billed(value.usage)) addUsage(bucket(purpose), value.usage);
     else { bucket(purpose).unknown++; log.unknown++; }
+    bucket(purpose).calls++;
   }
   // Starts without a terminal row: the call was still running or the process died mid-call — pending, never billed.
   for (const purpose of open.values()) {
     bucket(purpose).unknown++;
+    bucket(purpose).calls++;
     log.unknown++;
     log.pending++;
   }
   return log;
 }
 
-const EMPTY_COMPOSITION: CompositionLog = { recorded: false, requests: 0, leaks: 0, classes: {}, bytesTotal: 0, tokensEstimate: 0, purposes: {} };
+const EMPTY_COMPOSITION: CompositionLog = { recorded: false, requests: 0, leaks: 0, damaged: 0, classes: {}, bytesTotal: 0, tokensEstimate: 0, purposes: {} };
 
 /** Parse request-composition.jsonl rows (schema 1): exact per-class byte partition plus floor(bytes/4) estimates,
  * foreground `purpose:"main"` rows and background rows keyed to their usage-row ids. `leakFile` (native runs) counts
  * OptChat-leak flags the bench observer wrote. */
 export function parseCompositionLog(file: string | undefined, leakFile?: string): CompositionLog {
   if (!file || !existsSync(file)) return { ...EMPTY_COMPOSITION, classes: {}, purposes: {} };
-  const log: CompositionLog = { recorded: true, file: resolve(file), requests: 0, leaks: 0, classes: {}, bytesTotal: 0, tokensEstimate: 0, purposes: {} };
+  const log: CompositionLog = { recorded: true, file: resolve(file), requests: 0, leaks: 0, damaged: 0, classes: {}, bytesTotal: 0, tokensEstimate: 0, purposes: {} };
   for (const line of readFileSync(file, 'utf8').split('\n')) {
     if (!line.trim()) continue;
     let value: unknown;
-    try { value = JSON.parse(line); } catch { continue; }
-    if (!record(value)) continue;
+    try { value = JSON.parse(line); } catch { log.damaged++; continue; }
+    // A row without the contract shape (type/blocks/totalBytes) is damaged, not a request.
+    if (!record(value) || value.type !== 'request' || !record(value.blocks) || typeof value.totalBytes !== 'number') { log.damaged++; continue; }
     log.requests++;
     const purpose = typeof value.purpose === 'string' && value.purpose ? value.purpose : 'unclassified';
     const purposeBucket = log.purposes[purpose] ??= { requests: 0, bytesTotal: 0 };
@@ -280,9 +311,15 @@ const fmtCost = (n: number) => `$${n.toFixed(4)}`;
 
 export interface RunReportInput {
   label: string; mode: 'native' | 'optchat' | 'unknown'; workload: string;
+  identity?: RunIdentity;
   session?: ParsedSession; background: UsageLog; composition: CompositionLog; backgroundSettled?: boolean;
   /** Wire-derived (PI_REQ_DEBUG) actual token usage for native compaction calls, catalog-priced. */
   nativeCompactionUsage?: WireCompactionUsage;
+  correctnessPassed?: boolean;
+  /** Observed compaction/rollover signal for THIS mode (native compaction events, or OptChat view cuts). */
+  rolloverObserved?: boolean;
+  /** Total wire requests seen by PI_REQ_DEBUG (native + --wire-debug only), for the session/wire spend cross-check. */
+  nativeWireRequests?: number;
 }
 /** Actual token counters from the compaction request wire responses; costUsd is a catalog-priced estimate. */
 export interface WireCompactionUsage {
@@ -299,27 +336,28 @@ export function completenessOf(run: RunReportInput): RunReport['completeness'] {
     if (session.main.unknown) reasons.push(`${session.main.unknown} main calls without usable usage (error/aborted/unanswered)`);
     for (const [purpose, bucket] of Object.entries(session.modelUsage))
       if (bucket.unknown) reasons.push(`${bucket.unknown} ${purpose} calls without usable usage`);
+    if (session.damaged) reasons.push(`${session.damaged} unparseable session line(s) skipped — spend may be understated`);
     if (session.compaction.events > 0) {
       const wire = run.nativeCompactionUsage;
       if (!wire || wire.requests === 0)
         reasons.push(`${session.compaction.events} native compaction call(s) with no wire-captured usage — cost unknown`);
-      else {
-        if (wire.unpriced) reasons.push(`${wire.unpriced} native compaction call(s) on providers without catalog pricing — cost unknown`);
-        // Tokens are actual (wire SSE counters); USD is a catalog-priced estimate, never billed actuals.
-        reasons.push(`native compaction USD is a catalog-priced estimate over ${wire.requests} wire-captured call(s) (actual tokens), not provider-billed actuals`);
-      }
+      else if (wire.requests < session.compaction.events)
+        reasons.push(`only ${wire.requests} of ${session.compaction.events} native compaction call(s) wire-captured — ${session.compaction.events - wire.requests} cost(s) unknown`);
+      else if (wire.unpriced)
+        reasons.push(`${wire.unpriced} native compaction call(s) on providers without catalog pricing — cost unknown`);
+      // Fully known wire usage is complete: the catalog-pricing caveat is informational (pricingNote), not failure.
     }
-    if (session.branchResolution === 'linear')
-      reasons.push('session lacks id/parentId links; linear parse may double count branched sessions');
   }
   if (run.mode === 'optchat' && !run.background.recorded)
     reasons.push('background usage.jsonl absent (OptChat compactor/order calls unaccounted — measurement instrumentation not active)');
   if (run.background.pending) reasons.push(`${run.background.pending} background invocations unresolved (no terminal row) — accounting incomplete`);
+  if (run.background.damaged) reasons.push(`${run.background.damaged} unparseable background usage line(s) skipped — spend may be understated`);
   if (run.background.unknown) reasons.push(`${run.background.unknown} background attempts with unknown/null usage (failed-billed-unknown, never free)`);
   if (run.background.failed) reasons.push(`${run.background.failed} failed background attempts recorded`);
   if (run.backgroundSettled === false)
     reasons.push('background accounting did not settle within the bounded wait; usage.jsonl may still be draining (retained, not discarded)');
   if (!run.composition.recorded) reasons.push('request composition log absent');
+  if (run.composition.damaged) reasons.push(`${run.composition.damaged} unparseable composition line(s) skipped`);
   if (run.composition.leaks) reasons.push(`${run.composition.leaks} request(s) leaked OptChat context into the native comparator`);
   return { complete: reasons.length === 0, reasons };
 }
@@ -327,22 +365,58 @@ export function completenessOf(run: RunReportInput): RunReport['completeness'] {
 export function buildRunReport(input: RunReportInput): RunReport {
   const completeness = completenessOf(input);
   const smoke = input.workload !== 'long';
+  const wire = input.nativeCompactionUsage;
+  const evidence = smoke
+    ? 'smoke — NOT long-context evidence'
+    : input.rolloverObserved === true
+      ? 'long-context benchmark workload with observed compaction/rollover'
+      : 'long input, NOT compaction-tested';
   return {
     ...input,
     session: input.session,
     backgroundSettled: input.backgroundSettled !== false,
+    correctnessPassed: input.correctnessPassed,
+    pricingNote: wire && wire.requests > 0 && wire.unpriced === 0
+      ? `native compaction: ${wire.requests} wire-captured call(s), actual tokens, USD catalog-priced estimate — not billed actuals`
+      : undefined,
     completeness,
-    evidence: smoke
-      ? 'smoke — NOT long-context evidence'
-      : 'long-context benchmark workload (compaction/rollover exercised)',
-    savingsClaim: completeness.complete
-      ? 'eligible (complete accounting on this run; comparison still needs both sides complete)'
-      : 'none — incomplete accounting; see completeness.reasons',
+    evidence,
+    savingsClaim: completeness.complete && input.correctnessPassed === true
+      ? 'eligible (complete accounting + correctness PASS on this run; comparison still needs both sides)'
+      : completeness.complete
+        ? 'none — correctness checks failed; no cost verdict may be drawn from a failing run'
+        : 'none — incomplete accounting; see completeness.reasons',
     requests: input.session?.requests ?? 0,
   };
 }
 
-/** Cross-mode comparison. Request counts are informational only and never a savings basis. */
+/** One side's full spend: foreground session + background usage log + native compaction wire usage. */
+export interface SpendTotals {
+  foreground: UsageTotals; background: UsageTotals; compaction: WireCompactionUsage | undefined;
+  total: UsageTotals; backgroundCalls: number;
+}
+
+/** Foreground + background + compaction, summed once per side — the comparison basis. */
+export function aggregateSpend(run: RunReport): SpendTotals {
+  const background = emptyTotals();
+  let backgroundCalls = 0;
+  for (const bucket of Object.values(run.background.purposes)) {
+    addInto(background, bucket);
+    backgroundCalls += bucket.attempts;
+  }
+  const compaction = run.nativeCompactionUsage;
+  const total = emptyTotals();
+  addInto(total, run.session?.totals ?? emptyTotals());
+  addInto(total, background);
+  if (compaction) {
+    total.calls += compaction.requests; total.input += compaction.input; total.output += compaction.output;
+    total.cacheRead += compaction.cacheRead; total.cacheWrite += compaction.cacheWrite;
+    total.costUsd += compaction.costUsd;
+  }
+  return { foreground: run.session?.totals ?? emptyTotals(), background, compaction,
+    total, backgroundCalls };
+}
+
 export interface ComparisonTotals {
   costDeltaUsd?: number; inputTokensDelta?: number; cacheReadTokensDelta?: number; cacheWriteTokensDelta?: number;
 }
@@ -351,29 +425,49 @@ export interface ComparisonVerdict {
   verdict: string;
   requestCounts: { native: number; optchat: number; note: string };
   totals: ComparisonTotals;
+  spend: { native: SpendTotals; optchat: SpendTotals };
 }
 export type RunComparison = ComparisonVerdict & { native: string; optchat: string };
 
+const identityEqual = (a: RunIdentity | undefined, b: RunIdentity | undefined) => {
+  const pick = (identity: RunIdentity | undefined) => JSON.stringify({
+    model: identity?.model, compactor: identity?.compactor, thinking: identity?.thinking,
+    turns: identity?.turns, runLimit: identity?.runLimit,
+  });
+  return pick(a) === pick(b);
+};
+
+/** Cross-mode comparison over AGGREGATED spend (foreground + background + compaction). Eligible only when both
+ * sides are complete, both correctness suites PASS, and the run identity (model/compactor/shape) matches. Request
+ * counts are informational only and never a savings basis. */
 export function compareRuns(native: RunReport, optchat: RunReport): ComparisonVerdict {
+  const identityMatch = identityEqual(native.identity, optchat.identity);
   const eligible = native.completeness.complete && optchat.completeness.complete
-    && native.workload === optchat.workload;
+    && native.correctnessPassed === true && optchat.correctnessPassed === true
+    && native.workload === optchat.workload && identityMatch;
+  const nativeSpend = aggregateSpend(native), optchatSpend = aggregateSpend(optchat);
   const delta = (a: number, b: number) => b - a;
-  const totals = {
-    costDeltaUsd: eligible ? delta(native.session!.totals.costUsd, optchat.session!.totals.costUsd) : undefined,
-    inputTokensDelta: eligible ? delta(native.session!.totals.input, optchat.session!.totals.input) : undefined,
-    cacheReadTokensDelta: eligible ? delta(native.session!.totals.cacheRead, optchat.session!.totals.cacheRead) : undefined,
-    cacheWriteTokensDelta: eligible ? delta(native.session!.totals.cacheWrite, optchat.session!.totals.cacheWrite) : undefined,
+  const totals: ComparisonTotals = {
+    costDeltaUsd: eligible ? delta(nativeSpend.total.costUsd, optchatSpend.total.costUsd) : undefined,
+    inputTokensDelta: eligible ? delta(nativeSpend.total.input, optchatSpend.total.input) : undefined,
+    cacheReadTokensDelta: eligible ? delta(nativeSpend.total.cacheRead, optchatSpend.total.cacheRead) : undefined,
+    cacheWriteTokensDelta: eligible ? delta(nativeSpend.total.cacheWrite, optchatSpend.total.cacheWrite) : undefined,
   };
+  const ineligibleBecause: string[] = [];
+  if (!native.completeness.complete || !optchat.completeness.complete) ineligibleBecause.push('incomplete accounting');
+  if (native.correctnessPassed !== true || optchat.correctnessPassed !== true) ineligibleBecause.push('correctness failure');
+  if (!identityMatch) ineligibleBecause.push('run identity mismatch (model/compactor/shape)');
+  if (native.workload !== optchat.workload) ineligibleBecause.push('workload mismatch');
   return {
     eligible,
     verdict: eligible
-      ? `complete accounting on both sides: native ${fmtCost(native.session!.totals.costUsd)} vs optchat ${fmtCost(optchat.session!.totals.costUsd)} (delta ${fmtCost(totals.costDeltaUsd!)}); savings verdict is a cost comparison, not a request-count comparison`
-      : 'no savings verdict — incomplete accounting or mismatched workloads; see completeness.reasons per run',
+      ? `complete accounting + correctness PASS on both sides: total spend native ${fmtCost(nativeSpend.total.costUsd)} vs optchat ${fmtCost(optchatSpend.total.costUsd)} (delta ${fmtCost(totals.costDeltaUsd!)}); USD figures are catalog-priced estimates, not billed actuals; request counts (${native.requests} vs ${optchat.requests}) are informational only`
+      : `no savings verdict — ${ineligibleBecause.join('; ')}`,
     requestCounts: { native: native.requests, optchat: optchat.requests, note: 'informational only; request counts alone are not savings' },
     totals,
+    spend: { native: nativeSpend, optchat: optchatSpend },
   };
 }
-
 const sessionCandidates = (dir: string): string[] => {
   const manifest = readManifest(dir);
   const named = (manifest.runs ?? []).map(run => run.sessionFile)
