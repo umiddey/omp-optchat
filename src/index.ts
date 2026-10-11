@@ -133,6 +133,8 @@ export default function optchat(pi: ExtensionAPI) {
   });
   pi.on('context', async (event, ctx) => {
     if (!active(ctx)) return;
+    // A newer message (agent_start) or shutdown aborts this signal: the wait ends and this run is superseded, not broken.
+    const signal = controller.signal;
     try {
       const m = required();
       if (running && view === undefined) {
@@ -165,6 +167,7 @@ export default function optchat(pi: ExtensionAPI) {
       }
       return { messages: projectContext(event.messages, at, running ? view! : m.render(), memories, true, 'main', from, running ? orders : m.orders?.render() ?? '') };
     } catch (error) {
+      if (signal.aborted && !fault) return { messages: [{ role: 'developer' as const, content: 'OptChat: superseded by a newer message. Stop.', timestamp: 0 }] };
       fail(error, ctx);
       return { messages: [{ role: 'developer' as const, content: 'OptChat context unavailable. Stop.', timestamp: 0 }] };
     }

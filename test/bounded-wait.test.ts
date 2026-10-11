@@ -97,6 +97,32 @@ test('the context handler resolves within the settle budget when settle never re
   }
 });
 
+test('a new message interrupting the summaries wait does not disable OptChat', async () => {
+  const dir = mkdtempSync(join(tmpdir(), 'optchat-bound-'));
+  const { api, hooks, ctx, faults } = harness(dir);
+  const restore = withBoundBudget(dir, process.env.OMP_OPTCHAT_HOME);
+  process.env.OMP_OPTCHAT_SETTLE_BUDGET_MS = '60000';
+  // The real settle rejects when its signal aborts; the hang patch is off so that path runs.
+  delete process.env.OMP_OPTCHAT_TEST_HANG_SETTLE;
+  const user: AgentMessage = { role: 'user', content: `hello ${'x'.repeat(600)}`, timestamp: 1 };
+  const next: AgentMessage = { role: 'user', content: 'are you there?', timestamp: 2 };
+  try {
+    optchat(api);
+    await startRun(hooks, ctx, user);
+    const waiting = hooks.get('context')!({ messages: [user] }, ctx) as Promise<unknown>;
+    // OMP starts a new run for the interrupting message: agent_start aborts the old wait.
+    await hooks.get('agent_start')!({}, ctx);
+    await guard(waiting, 'the interrupted context handler did not resolve');
+    assert.deepEqual(faults, [], 'an interrupted wait is not a fault');
+    assert.equal(await hooks.get('input')!({}, ctx), undefined, 'the next input is accepted');
+    await hooks.get('message_end')!({ message: next }, ctx);
+  } finally {
+    restore();
+    await hooks.get('session_shutdown')?.({}, ctx);
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
+
 test('the bounded turn renders the chat opening with the unbuilt placeholder', async () => {
   const dir = mkdtempSync(join(tmpdir(), 'optchat-bound-'));
   const { api, hooks, ctx, faults } = harness(dir);
