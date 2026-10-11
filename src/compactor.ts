@@ -3,9 +3,10 @@ import { ThinkingLevel } from '@oh-my-pi/pi-agent-core';
 import type { ModelRegistry } from '@oh-my-pi/pi-coding-agent';
 import { COMPACT, compaction, tooLong } from './prompts.ts';
 import { bytes, NODE, type Compressor } from './memory.ts';
-import { cachePayload, splitView } from './cache.ts';
+import { cachePayload, record, splitView } from './cache.ts';
 import { EXTRACT_ORDERS, MIGRATE_LEDGER, CONSOLIDATE_ORDERS } from './prompts.ts';
 import { orderMap, type OrderDirective, type OrderTask } from './orders.ts';
+import { noInstrumentation, type Instrumentation, type SettledMeta } from './measurement.ts';
 
 export interface ModelChoice { provider: string; model: string; thinking: ThinkingLevel }
 /** OMP's streamSimple resolves the selected effort against the model's capabilities. */
@@ -47,9 +48,29 @@ function parseOrders(text: string, ids: readonly number[]) {
   try { return orderMap(JSON.parse(text.trim().replace(/^```(?:json)?\s*/, '').replace(/\s*```$/, '')), ids); }
   catch { return undefined; }
 }
+/** How a settled provider call is accounted: pi-ai resolves error and aborted streams into replies rather than throws,
+ * so the status comes from the reply when there is one; `usage` is what the provider actually reported — or unknown. */
+function outcome(reply: AssistantMessage): SettledMeta {
+  if (reply.stopReason === 'aborted') return { status: 'aborted', usage: measured(reply.usage), error: reply.errorMessage };
+  if (reply.stopReason === 'error') return { status: 'error', usage: measured(reply.usage), error: reply.errorMessage };
+  return { status: 'ok', usage: reply.usage };
+}
+/** pi-ai initializes a reply's usage all-zero before the provider reports, so a failed or aborted reply carrying only
+ * zeros has no measurement behind it: it files as unknown, never as a free failed call. Any nonzero counter is a real
+ * provider report and passes through. A successful reply's usage is never second-guessed (see the contract). */
+function measured(usage: unknown): unknown {
+  if (!record(usage)) return undefined;
+  return ['input', 'output', 'cacheRead', 'cacheWrite', 'totalTokens']
+    .some(key => typeof usage[key] === 'number' && Number(usage[key]) > 0) ? usage : undefined;
+}
+/** A provider call that ended in a throw: an aborted signal means the caller cancelled it, anything else is thrown. */
+function failure(error: unknown, signal: AbortSignal): SettledMeta {
+  return { status: signal.aborted ? 'aborted' : 'thrown', error: error instanceof Error ? error.message : String(error) };
+}
 /** The model is asked for 512 bytes; `accepted` is the longest line kept without a retry (the profile's summary size tolerance). */
 export function createCompressor(registry: ModelRegistry, choice: () => ModelChoice,
-  onUsage: (message: AssistantMessage) => void = () => {}, accepted = () => NODE): Compressor {
+  onUsage: (message: AssistantMessage) => void = () => {}, accepted = () => NODE,
+  instrument?: Instrumentation): Compressor {
   const gate = primeFirst();
   return async (input, signal) => {
     const selected = choice();
@@ -63,18 +84,26 @@ export function createCompressor(registry: ModelRegistry, choice: () => ModelCho
     const tries: { line: string; orders?: Map<number, OrderDirective[]> }[] = [];
     for (let attempt = 0; attempt < 5; attempt++) {
       const warmed = prefix ? await gate(prefix, signal) : () => {};
+      const span = (instrument ?? noInstrumentation)({ purpose: 'summary', provider: model.provider, model: model.id,
+        attempt: attempt + 1, part: input.part, ...(input.scan ? { scan: input.scan } : {}) });
       let reply: AssistantMessage;
       try {
         const stream = streamSimple(model, { systemPrompt: [COMPACT], messages }, {
           // A shared session id is the OpenAI prompt-cache key; SSE because over a websocket Codex would chain unrelated parallel calls on one cached connection.
           apiKey: await registry.getApiKey(model), sessionId: 'optchat-compactor',
           reasoning: thinking, signal, cacheRetention: 'short',
-          onPayload: payload => model.api === 'anthropic-messages' ? cachePayload(payload) : payload,
+          onPayload: payload => {
+            // Composition is read off the payload as sent, after the cache transform, which it never changes.
+            const transformed = model.api === 'anthropic-messages' ? cachePayload(payload) : payload;
+            span.payload(transformed, input.context);
+            return transformed;
+          },
         });
         // The cache entry is usable once the model starts answering.
         for await (const event of stream) if (event.type !== 'start') { warmed(event.type !== 'error'); break; }
         reply = await stream.result();
-      } finally { warmed(false); }
+        span.settled(outcome(reply));
+      } catch (error) { span.settled(failure(error, signal)); throw error; } finally { warmed(false); }
       onUsage(reply);
       if (reply.stopReason === 'error' || reply.stopReason === 'aborted') throw new Error(reply.errorMessage ?? `Compactor ${reply.stopReason}`);
       // The compactions' view shows each line under its id+n| head, which a line can copy.
@@ -98,16 +127,24 @@ export function createCompressor(registry: ModelRegistry, choice: () => ModelCho
 
 /** Orders reuse the profile's compactor model at medium effort, and never enter the summary tree. */
 export function createOrderTask(registry: ModelRegistry, choice: () => ModelChoice,
-  onUsage: (message: AssistantMessage) => void = () => {}): OrderTask {
+  onUsage: (message: AssistantMessage) => void = () => {}, instrument?: Instrumentation): OrderTask {
   return async (input, signal) => {
     const selected = choice(), model = registry.find(selected.provider, selected.model);
     if (!model) throw Error(`Compactor model unavailable: ${selected.provider}/${selected.model}`);
     const note = input.kind === 'consolidate' && input.retry ? `${input.retry}\n` : '';
     const messages: Message[] = [{ role: 'user', content: `${note}${JSON.stringify(input.kind === 'consolidate' ? { ...input, retry: undefined } : input)}`, timestamp: Date.now() }];
-    const reply = await streamSimple(model, {
-      systemPrompt: [input.kind === 'backfill' ? EXTRACT_ORDERS : input.kind === 'migrate' ? MIGRATE_LEDGER : CONSOLIDATE_ORDERS], messages,
-    }, { apiKey: await registry.getApiKey(model), sessionId: 'optchat-orders', reasoning: reasoningFor(model, ThinkingLevel.Medium),
-      signal, cacheRetention: 'short' }).result();
+    const span = (instrument ?? noInstrumentation)({ purpose: input.kind, provider: model.provider, model: model.id,
+      attempt: 1, ...(input.kind === 'consolidate' && input.retry ? { retry: true } : {}) });
+    let reply: AssistantMessage;
+    try {
+      reply = await streamSimple(model, {
+        systemPrompt: [input.kind === 'backfill' ? EXTRACT_ORDERS : input.kind === 'migrate' ? MIGRATE_LEDGER : CONSOLIDATE_ORDERS], messages,
+      }, { apiKey: await registry.getApiKey(model), sessionId: 'optchat-orders', reasoning: reasoningFor(model, ThinkingLevel.Medium),
+        signal, cacheRetention: 'short',
+        // The composition reads the payload as sent; orders carry no cache transform, so it passes through untouched.
+        onPayload: payload => { span.payload(payload); return payload; } }).result();
+      span.settled(outcome(reply));
+    } catch (error) { span.settled(failure(error, signal)); throw error; }
     onUsage(reply);
     if (reply.stopReason === 'error' || reply.stopReason === 'aborted') throw Error(reply.errorMessage ?? `Orders ${reply.stopReason}`);
     const text = reply.content.filter(c => c.type === 'text').map(c => c.text).join('').trim();

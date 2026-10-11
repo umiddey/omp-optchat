@@ -12,6 +12,7 @@ import { saveImages } from './images.ts';
 import { preparePrompt, projectContext, providerPayload, rawBytes, turnStart } from './integration.ts';
 import { registerMemoryTools } from './tools.ts';
 import { AgentIndex } from './agents.ts';
+import { MEASURE_DIR_ENV, openMeasurement, type Instrumentation, type Measurement } from './measurement.ts';
 import type { CacheState } from './cache.ts';
 
 /** OMP caps every extension handler at 30 s (extensions/runner.ts EXTENSION_HANDLER_TIMEOUT_MS) and keeps the unprojected
@@ -23,6 +24,7 @@ export const SETTLE_BUDGET_MS = 25_000;
 export default function optchat(pi: ExtensionAPI) {
   pi.registerFlag('optchat', { type: 'string', description: 'Use a never-ending OptChat memory profile (main agent only)' });
   let memory: Memory | undefined, release: (() => Promise<void>) | undefined;
+  let measurement: Measurement | undefined;
   let agents: AgentIndex | undefined;
   const cache: CacheState = {};
   let fault: string | undefined;
@@ -96,7 +98,14 @@ export default function optchat(pi: ExtensionAPI) {
       release = await lockProfile(dir, `OMP PID ${process.pid} (${ctx.cwd})`);
       const config = loadConfig(dir);
       runLimit = config.runLimit; recall = config.memories;
-      memory = await Memory.open(dir, createCompressor(ctx.modelRegistry, () => config.compactor), text => ctx.ui.notify(text, 'warning'), undefined, undefined, createOrderTask(ctx.modelRegistry, () => config.compactor));
+      // Telemetry lands in the profile, or wherever OMP_OPTCHAT_MEASURE_DIR points for benchmark runs; it never
+      // faults the session — openMeasurement warns boundedly and keeps working, or drops rows.
+      const telemetry = openMeasurement(process.env[MEASURE_DIR_ENV] ?? dir, text => ctx.ui.notify(text, 'warning'));
+      measurement = telemetry;
+      // The span source is the sink itself, not the `measurement` slot: a straggling background call at shutdown
+      // must settle into the (closed, appendable-again) files instead of dereferencing a cleared variable.
+      const instrument: Instrumentation = meta => telemetry.invoke(meta);
+      memory = await Memory.open(dir, createCompressor(ctx.modelRegistry, () => config.compactor, undefined, undefined, instrument), text => ctx.ui.notify(text, 'warning'), undefined, undefined, createOrderTask(ctx.modelRegistry, () => config.compactor, undefined, instrument));
       agents = new AgentIndex(dir, text => ctx.ui.notify(text, 'warning'), () => ctx.sessionManager.getSessionFile());
       const setting = lookup('compaction.enabled');
       if (!setting) throw new Error('OMP compaction.enabled setting unavailable.');
@@ -105,6 +114,7 @@ export default function optchat(pi: ExtensionAPI) {
       ctx.ui.setStatus('optchat', `OptChat: ${selected()}`);
     } catch (error) {
       fail(error, ctx); await release?.(); release = undefined;
+      measurement?.close(); measurement = undefined;
       if (ctx.mode !== 'tui') throw error;
     }
   });
@@ -181,6 +191,9 @@ export default function optchat(pi: ExtensionAPI) {
     try {
       required();
       const payload = providerPayload(event.payload, true, ctx.agent.kind, ctx.model?.api, cache);
+      // Composition of the request as sent, read after the cache transform; the payload itself is returned unchanged.
+      // Usage for these foreground calls is OMP's own session journal, so only the composition is recorded here.
+      if (measurement) measurement.request(payload, ctx.model ? { provider: ctx.model.provider, id: ctx.model.id } : undefined, running ? view : undefined);
       const dir = process.env.OMP_OPTCHAT_DUMP_DIR;
       if (dir) { mkdirSync(dir, { recursive: true, mode: 0o700 }); writeFileSync(join(dir, `${String(++sequence).padStart(6, '0')}-${ctx.agent.kind}.json`), JSON.stringify(payload, null, 2), { mode: 0o600 }); }
       return payload;
@@ -194,5 +207,6 @@ export default function optchat(pi: ExtensionAPI) {
   pi.on('session_shutdown', async (_event, ctx) => {
     if (!active(ctx)) return;
     controller.abort(); await memory?.close(); await release?.(); release = undefined;
+    measurement?.close(); measurement = undefined;
   });
 }
