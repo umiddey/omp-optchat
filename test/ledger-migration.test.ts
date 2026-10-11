@@ -19,6 +19,17 @@ test('migration missing an index keeps that ledger item verbatim until next-batc
   expect(JSON.parse(readFileSync(join(dir, 'ledger.json'), 'utf8')).migrationDone).toBe(true);
  });
 });
+test('a failed migration call (rate limit) stages nothing, so the next start migrates again', async () => {
+ const old = rule('The disk is the truth, not the handover text.', 24);
+ await fixture([old], async input => {
+  if (input.kind === 'migrate') throw Error('429 rate_limit_error');
+  return [{ ...old, covers: [0] }];
+ }, async (o, dir) => {
+  o.backfill([], () => false); await o.drain(); await o.batch(31);
+  expect(o.ledger.items).toContainEqual(old);
+  expect(JSON.parse(readFileSync(join(dir, 'ledger.json'), 'utf8')).migrationDone).toBeUndefined();
+ });
+});
 test('migration pulls a path-losing member out of its merge group and keeps the remaining members merged', async () => {
  const old = [rule('Read /rules/a.md before work.', 1), rule('Read /rules/b.md before work.', 2), rule('Read /rules/c.md before work.', 3)];
  await fixture(old, async input => input.kind === 'migrate'

@@ -323,7 +323,8 @@ export class Orders {
    }));
    let answer: unknown;
    try { answer = await this.task({ kind: 'migrate', items: batch }, this.controller.signal); }
-   catch (error) { if (this.stopped) return; this.warn(`Orders migration: ${String(error)}`); }
+   // A failed call (rate limit, outage) stages nothing: the ledger stays as it is and the next start migrates again.
+   catch (error) { if (!this.stopped) this.warn(`Orders migration: ${String(error)}; retried at the next start.`); return; }
    const groups: { indexes: number[]; order: StandingOrder; accepted: MigrationItem[] }[] = [];
    if (Array.isArray(answer)) for (const raw of answer) {
     if (typeof raw !== 'object' || !raw) continue;
