@@ -1,4 +1,4 @@
-import { appendFileSync, existsSync, mkdirSync, readFileSync, readdirSync, statSync, writeFileSync } from 'node:fs';
+import { appendFileSync, existsSync, mkdirSync, readFileSync, readdirSync, rmSync, statSync, writeFileSync } from 'node:fs';
 import { join, resolve } from 'node:path';
 import type { Usage } from '@oh-my-pi/pi-ai';
 import { calculateCost } from '@oh-my-pi/pi-catalog/models';
@@ -183,7 +183,7 @@ class RpcSession {
 const HANDOFF_TEMPLATE_MARKER = '[What should happen next]';
 const SERIALIZED_USER_END = '[user:end]';
 const COMPACTION_STOP = 'compaction';
-export interface WireUsage { requests: number; input: number; output: number; cacheRead: number; cacheWrite: number; costUsd: number; unpriced: number }
+export interface WireUsage { requests: number; input: number; output: number; cacheRead: number; cacheWrite: number; costUsd: number; unpriced: number; noResponse: number }
 
 /** Wire-level capture over pi-ai's request-debug hook (PI_REQ_DEBUG=1 wraps EVERY streamSimple fetch, including
  * native compaction side streams the session journal never records). Native runs only — OptChat background is
@@ -191,32 +191,35 @@ export interface WireUsage { requests: number; input: number; output: number; ca
  * after parse (its headers carry credentials and are never persisted or published); responses are raw SSE in
  * rr-session-N.res.log, and Anthropic usage comes from message_start + message_delta counters.
  * Classification (validated against real proof artifacts /tmp/optchat-native-compaction-proof):
- * - native/remote compaction: the RESPONSE stop_reason is `compaction` (AnthropicCompaction side stream);
+ * - native/remote compaction: the request body carries the top-level `compaction` directive (seen on every remote
+ *   attempt, including ones the provider answers with stop_reason `refusal` and zero usage), or the RESPONSE
+ *   stop_reason is `compaction`;
  * - handoff compaction: the request's last user message carries the handoff summary template placeholder
  *   `[What should happen next]` (compaction.ts renders the full conversation into that template);
  * - memory-extractor side calls (no tools, `[user:end]` serialization): journaled by the session as model_usage
  *   (`memory`) — counted separately and EXCLUDED from spend, so token costs are never double counted;
  * - everything else is a main/other wire request, counted only for the wire/session cross-check. */
 class ReqDebugCapture {
-  private readonly usage: Required<WireUsage> = { requests: 0, input: 0, output: 0, cacheRead: 0, cacheWrite: 0, costUsd: 0, unpriced: 0 };
+  private readonly usage: Required<WireUsage> = { requests: 0, input: 0, output: 0, cacheRead: 0, cacheWrite: 0, costUsd: 0, unpriced: 0, noResponse: 0 };
   totalRequests = 0;
   journaledWireRequests = 0;
   constructor(private readonly cwd: string, private readonly registry: import('@oh-my-pi/pi-coding-agent').ModelRegistry | undefined) {}
-  /** Parse every rr-session dump in the run cwd, sanitize request headers in place, extract compaction usage. */
+  /** Sanitize every rr-session dump in the run cwd first (a later pricing/parse failure must never leave credential
+   * headers on disk; an unparseable dump is deleted outright), then extract compaction usage. */
   harvest(): Required<WireUsage> {
+    const dumps: { requestPath: string; dump: Record<string, unknown> }[] = [];
     for (const name of readdirSync(this.cwd).filter(f => /^rr-session-\d+\.json$/.test(f)).sort()) {
       const requestPath = join(this.cwd, name);
-      let dump: Record<string, unknown>;
-      try {
-        const parsed: unknown = JSON.parse(readFileSync(requestPath, 'utf8'));
-        if (!record(parsed)) continue;
-        dump = parsed;
-      } catch { continue; }
-      // Sanitize first: strip credential-bearing headers from the dump on disk, keep method/url/body.
-      if (dump.headers !== undefined) {
-        const { headers: _headers, ...sanitized } = dump;
+      let parsed: unknown;
+      try { parsed = JSON.parse(readFileSync(requestPath, 'utf8')); } catch { parsed = undefined; }
+      if (!record(parsed)) { rmSync(requestPath, { force: true }); continue; }
+      if (parsed.headers !== undefined) {
+        const { headers: _headers, ...sanitized } = parsed;
         writeFileSync(requestPath, JSON.stringify(sanitized, null, 2) + '\n');
       }
+      dumps.push({ requestPath, dump: parsed });
+    }
+    for (const { requestPath, dump } of dumps) {
       this.totalRequests++;
       const bodyText = typeof dump.bodyText === 'string' ? dump.bodyText
         : typeof dump.body === 'string' ? dump.body : undefined;
@@ -233,9 +236,11 @@ class ReqDebugCapture {
       const kind = this.classify(body, response);
       if (kind === 'main') continue;
       if (kind === 'journaled') { this.journaledWireRequests++; continue; }
-      if (!response) continue;
+      // Never skip a compaction request silently: no response means usage is unavailable, unparseable usage means
+      // cost unknown. Both keep the run incomplete.
+      if (!response) { this.usage.noResponse++; continue; }
       const usage = parseAnthropicSseUsage(response);
-      if (!usage) continue;
+      if (!usage) { this.usage.unpriced++; continue; }
       this.usage.requests++;
       this.usage.input += usage.input; this.usage.output += usage.output;
       this.usage.cacheRead += usage.cacheRead; this.usage.cacheWrite += usage.cacheWrite;
@@ -248,17 +253,22 @@ class ReqDebugCapture {
         ? this.registry.find(provider, slash > 0 ? modelId.slice(slash + 1) : modelId)
         : undefined;
       if (!model) { this.usage.unpriced++; continue; }
-      // calculateCost reads exactly these token counters and writes usage.cost — the priced surface of Usage.
+      // calculateCost reads these token counters and fills usage.cost in place (it must exist), returning it.
       // Catalog-priced estimate from the model price table; never a billed-actual dollars claim.
-      const priced = { input: usage.input, output: usage.output, cacheRead: usage.cacheRead, cacheWrite: usage.cacheWrite } as unknown as import('@oh-my-pi/pi-ai').Usage;
-      calculateCost(model, priced);
-      this.usage.costUsd += record(priced.cost) && typeof priced.cost.total === 'number' ? priced.cost.total : 0;
+      const priced = {
+        input: usage.input, output: usage.output, cacheRead: usage.cacheRead, cacheWrite: usage.cacheWrite,
+        totalTokens: usage.input + usage.output + usage.cacheRead + usage.cacheWrite,
+        cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0, total: 0 },
+      } as unknown as import('@oh-my-pi/pi-ai').Usage;
+      const cost = calculateCost(model, priced);
+      this.usage.costUsd += typeof cost.total === 'number' ? cost.total : 0;
     }
     return { ...this.usage };
   }
 
   /** Wire-level call class from the sanitized request body and the raw SSE response. */
   private classify(body: Record<string, unknown> | undefined, response: string | undefined): 'compaction' | 'journaled' | 'main' {
+    if (body && body.compaction !== undefined) return 'compaction';
     if (response && /"stop_reason":"compaction"/.test(response)) return 'compaction';
     const lastUser = body && Array.isArray(body.messages)
       ? body.messages.filter(record).filter(message => message.role === 'user').at(-1)

@@ -27,7 +27,9 @@ export interface ParsedSession {
   branchy: boolean;
   main: UsageTotals;
   modelUsage: Record<string, SessionPurpose>;
-  compaction: { events: number; branchSummaries: number; tokensBefore: number[] };
+  /** `modelBacked` excludes local methods (snapcompact/shake) that make no model call; legacy entries without a
+   * method count as model-backed (conservative: they demand wire evidence). */
+  compaction: { events: number; modelBacked: number; branchSummaries: number; tokensBefore: number[] };
   requests: number;
   totals: UsageTotals;
 }
@@ -47,7 +49,9 @@ export interface RunReport {
   backgroundSettled: boolean;
   nativeCompactionUsage?: WireCompactionUsage;
   correctnessPassed?: boolean;
-  completeness: { complete: boolean; reasons: string[] };
+  /** `costUnknownOnly`: every reason is an unknown/unpriced cost (never an integrity failure), so known spend is a
+   * valid LOWER bound for this side. */
+  completeness: { complete: boolean; reasons: string[]; costUnknownOnly: boolean };
   /** Informational, not a failure: compaction tokens are actual wire counters, USD is a catalog-priced estimate. */
   pricingNote?: string;
   evidence: string;
@@ -71,7 +75,7 @@ const addInto = (into: UsageTotals, from: UsageTotals) => {
   into.costUsd += from.costUsd; into.costKnownCalls += from.costKnownCalls; into.unknown += from.unknown;
 };
 
-interface SessionEntryLike { type?: string; id?: unknown; parentId?: unknown; message?: unknown; purpose?: unknown; role?: unknown; model?: unknown; provider?: unknown; usage?: unknown; stopReason?: unknown; errorMessage?: unknown; tokensBefore?: unknown; timestamp?: unknown }
+interface SessionEntryLike { type?: string; id?: unknown; parentId?: unknown; message?: unknown; purpose?: unknown; role?: unknown; model?: unknown; provider?: unknown; usage?: unknown; stopReason?: unknown; errorMessage?: unknown; tokensBefore?: unknown; timestamp?: unknown; method?: unknown }
 
 function entriesOf(file: string): { entries: SessionEntryLike[]; damaged: number } {
   const lines = readFileSync(file, 'utf8').split('\n');
@@ -152,7 +156,7 @@ export function parseSession(file: string): ParsedSession {
     branchy: entriesOfIsBranchy(entries),
     main: emptyTotals(),
     modelUsage: {},
-    compaction: { events: 0, branchSummaries: 0, tokensBefore: [] },
+    compaction: { events: 0, modelBacked: 0, branchSummaries: 0, tokensBefore: [] },
     requests: 0, totals: emptyTotals(),
   };
   for (const entry of entries) {
@@ -177,7 +181,10 @@ export function parseSession(file: string): ParsedSession {
       if (billed(entry.usage)) addUsage(bucket, entry.usage);
       else bucket.unknown++;
     } else if (entry.type === 'compaction' || entry.type === 'branch_summary') {
-      if (entry.type === 'compaction') parsed.compaction.events++;
+      if (entry.type === 'compaction') {
+        parsed.compaction.events++;
+        if (entry.method !== 'snapcompact' && entry.method !== 'shake') parsed.compaction.modelBacked++;
+      }
       else parsed.compaction.branchSummaries++;
       if (typeof entry.tokensBefore === 'number') parsed.compaction.tokensBefore.push(entry.tokensBefore);
     }
@@ -325,41 +332,48 @@ export interface RunReportInput {
 export interface WireCompactionUsage {
   requests: number; input: number; output: number; cacheRead: number; cacheWrite: number;
   costUsd: number; unpriced: number;
+  /** Compaction requests sent without any response (fetch rejected/aborted before headers): usage unavailable. */
+  noResponse: number;
 }
 
 /** Completeness + verdict rules for one measured run. */
 export function completenessOf(run: RunReportInput): RunReport['completeness'] {
   const reasons: string[] = [];
+  // Integrity failures void the run; cost gaps only make its known spend a lower bound.
+  let integrity = false;
+  const fail = (reason: string) => { integrity = true; reasons.push(reason); };
   const session = run.session;
-  if (!session) reasons.push('no session parsed');
+  if (!session) fail('no session parsed');
   else {
     if (session.main.unknown) reasons.push(`${session.main.unknown} main calls without usable usage (error/aborted/unanswered)`);
     for (const [purpose, bucket] of Object.entries(session.modelUsage))
       if (bucket.unknown) reasons.push(`${bucket.unknown} ${purpose} calls without usable usage`);
     if (session.damaged) reasons.push(`${session.damaged} unparseable session line(s) skipped — spend may be understated`);
-    if (session.compaction.events > 0) {
+    const modelBacked = session.compaction.modelBacked;
+    if (modelBacked > 0) {
       const wire = run.nativeCompactionUsage;
       if (!wire || wire.requests === 0)
-        reasons.push(`${session.compaction.events} native compaction call(s) with no wire-captured usage — cost unknown`);
-      else if (wire.requests < session.compaction.events)
-        reasons.push(`only ${wire.requests} of ${session.compaction.events} native compaction call(s) wire-captured — ${session.compaction.events - wire.requests} cost(s) unknown`);
-      else if (wire.unpriced)
-        reasons.push(`${wire.unpriced} native compaction call(s) on providers without catalog pricing — cost unknown`);
+        reasons.push(`${modelBacked} model-backed native compaction(s) with no wire-captured usage — cost unknown`);
+      else if (wire.requests < modelBacked)
+        reasons.push(`only ${wire.requests} of ${modelBacked} model-backed native compaction(s) wire-captured — ${modelBacked - wire.requests} cost(s) unknown`);
       // Fully known wire usage is complete: the catalog-pricing caveat is informational (pricingNote), not failure.
     }
+    const wire = run.nativeCompactionUsage;
+    if (wire?.unpriced) reasons.push(`${wire.unpriced} native compaction call(s) unpriced (no catalog price or unparseable usage) — cost unknown`);
+    if (wire?.noResponse) reasons.push(`${wire.noResponse} native compaction request(s) sent but no response received (aborted before headers) — provider usage unavailable`);
   }
   if (run.mode === 'optchat' && !run.background.recorded)
-    reasons.push('background usage.jsonl absent (OptChat compactor/order calls unaccounted — measurement instrumentation not active)');
+    fail('background usage.jsonl absent (OptChat compactor/order calls unaccounted — measurement instrumentation not active)');
   if (run.background.pending) reasons.push(`${run.background.pending} background invocations unresolved (no terminal row) — accounting incomplete`);
   if (run.background.damaged) reasons.push(`${run.background.damaged} unparseable background usage line(s) skipped — spend may be understated`);
   if (run.background.unknown) reasons.push(`${run.background.unknown} background attempts with unknown/null usage (failed-billed-unknown, never free)`);
   if (run.background.failed) reasons.push(`${run.background.failed} failed background attempts recorded`);
   if (run.backgroundSettled === false)
     reasons.push('background accounting did not settle within the bounded wait; usage.jsonl may still be draining (retained, not discarded)');
-  if (!run.composition.recorded) reasons.push('request composition log absent');
-  if (run.composition.damaged) reasons.push(`${run.composition.damaged} unparseable composition line(s) skipped`);
-  if (run.composition.leaks) reasons.push(`${run.composition.leaks} request(s) leaked OptChat context into the native comparator`);
-  return { complete: reasons.length === 0, reasons };
+  if (!run.composition.recorded) fail('request composition log absent');
+  if (run.composition.damaged) fail(`${run.composition.damaged} unparseable composition line(s) skipped`);
+  if (run.composition.leaks) fail(`${run.composition.leaks} request(s) leaked OptChat context into the native comparator`);
+  return { complete: reasons.length === 0, reasons, costUnknownOnly: reasons.length > 0 && !integrity };
 }
 
 export function buildRunReport(input: RunReportInput): RunReport {
@@ -458,10 +472,22 @@ export function compareRuns(native: RunReport, optchat: RunReport): ComparisonVe
   if (native.correctnessPassed !== true || optchat.correctnessPassed !== true) ineligibleBecause.push('correctness failure');
   if (!identityMatch) ineligibleBecause.push('run identity mismatch (model/compactor/shape)');
   if (native.workload !== optchat.workload) ineligibleBecause.push('workload mismatch');
+  // Lower bound: when the ONLY blocker is unknown cost on one side, that side's known spend is a floor (unknown
+  // calls cost >= 0). A complete side cheaper than that floor is cheaper for certain, by at least the gap.
+  const onlyCostGap = ineligibleBecause.length === 1 && ineligibleBecause[0] === 'incomplete accounting';
+  const floorSide = onlyCostGap && native.completeness.complete !== optchat.completeness.complete
+    ? (native.completeness.complete ? 'optchat' : 'native') : undefined;
+  const floor = floorSide === 'native' ? native : floorSide === 'optchat' ? optchat : undefined;
+  const exactSpend = floorSide === 'native' ? optchatSpend : nativeSpend;
+  const floorSpend = floorSide === 'native' ? nativeSpend : optchatSpend;
+  const lowerBound = floor?.completeness.costUnknownOnly && exactSpend.total.costUsd < floorSpend.total.costUsd
+    ? `${floorSide === 'native' ? 'optchat' : 'native'} cheaper by AT LEAST ${fmtCost(floorSpend.total.costUsd - exactSpend.total.costUsd)}: ${floorSide} known spend ${fmtCost(floorSpend.total.costUsd)} is a floor (${floor.completeness.reasons.join('; ')}), ${floorSide === 'native' ? 'optchat' : 'native'} complete at ${fmtCost(exactSpend.total.costUsd)}; correctness PASS both; catalog-priced estimates, not billed actuals`
+    : undefined;
   return {
     eligible,
     verdict: eligible
       ? `complete accounting + correctness PASS on both sides: total spend native ${fmtCost(nativeSpend.total.costUsd)} vs optchat ${fmtCost(optchatSpend.total.costUsd)} (delta ${fmtCost(totals.costDeltaUsd!)}); USD figures are catalog-priced estimates, not billed actuals; request counts (${native.requests} vs ${optchat.requests}) are informational only`
+      : lowerBound ? `lower-bound verdict — ${lowerBound}`
       : `no savings verdict — ${ineligibleBecause.join('; ')}`,
     requestCounts: { native: native.requests, optchat: optchat.requests, note: 'informational only; request counts alone are not savings' },
     totals,

@@ -170,13 +170,13 @@ describe('completeness and comparison', () => {
 
   test('fully known wire compaction usage is complete; pricing stays an informational note', () => {
     const withCompaction = session('bench-session-optchat.jsonl');
-    withCompaction.compaction = { ...withCompaction.compaction, events: 1, tokensBefore: [190000] };
+    withCompaction.compaction = { ...withCompaction.compaction, events: 1, modelBacked: 1, tokensBefore: [190000] };
     const report = buildRunReport({
       label: 'native', mode: 'native', workload: 'smoke',
       session: withCompaction,
       background: parseUsageLog(undefined),
       composition: { ...parseCompositionLog(undefined), recorded: true, requests: 2 },
-      nativeCompactionUsage: { requests: 1, input: 190_000, output: 800, cacheRead: 0, cacheWrite: 0, costUsd: 0.31, unpriced: 0 },
+      nativeCompactionUsage: { requests: 1, input: 190_000, output: 800, cacheRead: 0, cacheWrite: 0, costUsd: 0.31, unpriced: 0, noResponse: 0 },
       correctnessPassed: true,
     });
     expect(report.completeness.complete).toBe(true);
@@ -191,11 +191,25 @@ describe('completeness and comparison', () => {
       session: session('bench-session-native.jsonl'),
       background: parseUsageLog(undefined),
       composition: parseCompositionLog(undefined),
-      nativeCompactionUsage: { requests: 0, input: 0, output: 0, cacheRead: 0, cacheWrite: 0, costUsd: 0, unpriced: 0 },
+      nativeCompactionUsage: { requests: 0, input: 0, output: 0, cacheRead: 0, cacheWrite: 0, costUsd: 0, unpriced: 0, noResponse: 0 },
     });
     expect(report.completeness.complete).toBe(false);
     expect(report.completeness.reasons.some(r => r.includes('no wire-captured usage'))).toBe(true);
     expect(report.evidence).toContain('NOT compaction-tested');
+  });
+
+  test('local snapcompact needs no wire evidence; a compaction request with no response is a cost gap', () => {
+    const local = session('bench-session-optchat.jsonl');
+    local.compaction = { ...local.compaction, events: 1, modelBacked: 0 };
+    const base = {
+      label: 'native', mode: 'native' as const, workload: 'long', session: local,
+      background: parseUsageLog(undefined), composition: { ...parseCompositionLog(undefined), recorded: true, requests: 1 },
+    };
+    expect(buildRunReport(base).completeness).toEqual({ complete: true, reasons: [], costUnknownOnly: false });
+    const aborted = buildRunReport({ ...base,
+      nativeCompactionUsage: { requests: 0, input: 0, output: 0, cacheRead: 0, cacheWrite: 0, costUsd: 0, unpriced: 0, noResponse: 1 } });
+    expect(aborted.completeness.complete).toBe(false);
+    expect(aborted.completeness.costUnknownOnly).toBe(true);
   });
 
   test('damaged telemetry in any sink forces incomplete', () => {
@@ -240,7 +254,7 @@ describe('compareRuns over aggregated spend', () => {
     session: session('bench-session-optchat.jsonl'),
     background: parseUsageLog(undefined),
     composition: parseCompositionLog(compositionFile),
-    nativeCompactionUsage: { requests: 1, input: 1000, output: 100, cacheRead: 0, cacheWrite: 0, costUsd: 0.002, unpriced: 0 },
+    nativeCompactionUsage: { requests: 1, input: 1000, output: 100, cacheRead: 0, cacheWrite: 0, costUsd: 0.002, unpriced: 0, noResponse: 0 },
     correctnessPassed: true,
   });
   const optchat = buildRunReport({
@@ -282,6 +296,24 @@ describe('compareRuns over aggregated spend', () => {
     const comparison = compareRuns(native, failed);
     expect(comparison.eligible).toBe(false);
     expect(comparison.verdict).toContain('correctness failure');
+  });
+
+  test('lower bound only when the complete side beats the incomplete side known floor and nothing else fails', () => {
+    const gap = { requests: 1, input: 1000, output: 100, cacheRead: 0, cacheWrite: 0, unpriced: 0, noResponse: 1 };
+    const nativeOf = (costUsd: number, leaks = 0) => buildRunReport({
+      label: 'native', mode: 'native', workload: 'smoke', identity,
+      session: session('bench-session-optchat.jsonl'), background: parseUsageLog(undefined),
+      composition: { ...parseCompositionLog(compositionFile), leaks },
+      nativeCompactionUsage: { ...gap, costUsd }, correctnessPassed: true,
+    });
+    const floorAbove = compareRuns(nativeOf(5), optchat);
+    expect(floorAbove.eligible).toBe(false);
+    const gapUsd = aggregateSpend(nativeOf(5)).total.costUsd - aggregateSpend(optchat).total.costUsd;
+    expect(floorAbove.verdict).toContain(`optchat cheaper by AT LEAST $${gapUsd.toFixed(4)}`);
+    // Known floor below the complete side: the unknown could go either way.
+    expect(compareRuns(nativeOf(0.001), optchat).verdict).toStartWith('no savings verdict');
+    // An integrity failure voids the floor even when the numbers would favour one side.
+    expect(compareRuns(nativeOf(5, 1), optchat).verdict).toStartWith('no savings verdict');
   });
 
   test('identity mismatch refuses comparison', () => {

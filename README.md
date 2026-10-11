@@ -225,13 +225,16 @@ bun scripts/grouping-experiment.ts --home /tmp/optchat-grouping-new \
 
 Use fresh output paths. Matched runs check factual recall, a standing order on replies and a filesystem
 artifact; an OptChat-only zoom probe runs separately and is excluded from comparative totals.
-`--repetitions N` repeats independent runs; `--workload long --turns N` adds long-context pressure.
+`--repetitions N` repeats independent runs; `--workload long --turns N` adds long-context pressure, and
+`--compaction-threshold TOKENS` forces native OMP compaction at the same threshold in both modes.
+`--wire-debug` also wire-captures OptChat runs for a session/wire request cross-check.
 Smoke results are not evidence of long-context savings. A comparison needs matched configuration,
 passing correctness checks and complete foreground/background accounting, including retries.
 Unknown or unfinished calls cannot be treated as free. Native OMP compaction usage is not recorded in its
 session journal; benchmark-only wire capture handles supported response formats and reports gaps explicitly.
-Transient wire dumps can contain authentication headers: benchmark directories are private, and headers
-must be scrubbed before reports are retained or shared. Do not run benchmarks on a private/live profile.
+Transient wire dumps (`rr-session-N.json` in the run's cwd) carry authentication headers; the runner strips
+them after every run, including failed ones. A killed runner can leave them behind: benchmark directories are
+private, so delete them before sharing. Do not run benchmarks on a private/live profile.
 
 The grouping experiment compares message-level logging with assistant-tool-call/result units, preserving
 source-id mapping and user/steering boundaries. It reports exact logged-source retrieval, ledger rule/goal
