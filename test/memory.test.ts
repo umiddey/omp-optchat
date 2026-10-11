@@ -8,6 +8,8 @@ import { appendJson, localDay } from '../src/store.ts';
 import { lockProfile } from '../src/profiles.ts';
 import { boundedMessage } from '../src/transcript.ts';
 import type { ToolResultMessage } from '@oh-my-pi/pi-ai';
+// ~200 fsynced appends and atomic writes: 0.1 s locally, but 3.8 s and >5 s on GitHub runners (v0.2.5, v0.2.7), so the
+// bounds are generous; the test checks coverage and durability, not speed.
 test('tree covers all history, fits incrementally, and exact originals survive restart', async () => {
   const dir = mkdtempSync(join(tmpdir(), 'optchat-test-'));
   const calls: Compression[] = [];
@@ -15,7 +17,7 @@ test('tree covers all history, fits incrementally, and exact originals survive r
   let memory = new Memory(dir, compress, () => {}, 1500);
   try {
     for (let i = 0; i < 48; i++) memory.append('user', `Original ${i}: ${'valuable detail '.repeat(30)}`);
-    await memory.settle(AbortSignal.timeout(5000), 'tree');
+    await memory.settle(AbortSignal.timeout(25_000), 'tree');
     assert.equal(start(memory.view[0]), 0);
     assert.equal(end(memory.view.at(-1)!), 48);
     for (let i = 1; i < memory.view.length; i++) assert.equal(end(memory.view[i - 1]), start(memory.view[i]));
@@ -26,16 +28,16 @@ test('tree covers all history, fits incrementally, and exact originals survive r
     const originals = memory.root.map(e => e.text);
     const parts = [...memory.view];
     memory.append('talk', 'One short new reply.');
-    await memory.settle(AbortSignal.timeout(5000), 'tree');
+    await memory.settle(AbortSignal.timeout(25_000), 'tree');
     for (const before of parts) assert.ok(memory.view.some(after => start(after) <= start(before) && end(after) >= end(before)));
     await memory.close();
     memory = new Memory(dir, compress, () => {}, 1500);
-    await memory.settle(AbortSignal.timeout(5000), 'tree');
+    await memory.settle(AbortSignal.timeout(25_000), 'tree');
     assert.deepEqual(memory.root.slice(0, 48).map(e => e.text), originals);
     assert.match(memory.zoom(17, 1), /valuable detail/);
     assert.throws(() => memory.zoom(3, 4), /No line/);
   } finally { await memory.close(); rmSync(dir, { recursive: true, force: true }); }
-});
+}, 60_000);
 
 test('a turn waits for pending summaries, goes on once they have all failed, and failures keep retrying', async () => {
   const dir = mkdtempSync(join(tmpdir(), 'optchat-test-')); let attempts = 0;
