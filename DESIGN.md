@@ -254,7 +254,7 @@ tool results/injections unchanged. The current message is the run's first messag
 into the running turn (OMP adds such messages to the same run): then it is the newest user message before
 the cut, and the run's first message lives on only in the view. Otherwise the model would answer a stale
 prompt while the new one sat only in the summaries.
-tool results/injections unchanged. An individual assistant/tool batch can exceed the bound until a newer
+An individual assistant/tool batch can exceed the bound until a newer
 assistant exists: never split tool-use/result pairs or discard the last assistant's thinking.
 Store the cut message, not its array index. Resolve its role + timestamp with `findLastIndex` on every
 context call, so inserted history cannot move the boundary. If rewritten history no longer contains the
