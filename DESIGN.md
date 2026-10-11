@@ -229,6 +229,16 @@ publication permits one cache rewrite. The ledger never modifies tree nodes or r
 6. Any failure: `ctx.abort()` and return a single system message "OptChat context unavailable. Stop." —
    never fall back to the full OMP history (pi-optchat 385-391).
 
+**Turn-start wait is bounded by OMP's 30 s handler cap.** OMP runs every extension handler under a 30 s cap
+(`EXTENSION_HANDLER_TIMEOUT_MS` in `pi-coding-agent/src/extensibility/extensions/runner.ts`) and keeps the
+unprojected session history when a `context` handler crosses it, so both settle waits (1 and the rollover)
+race `memory.settle(signal)` against a 25 s budget (`SETTLE_BUDGET_MS`; `OMP_OPTCHAT_SETTLE_BUDGET_MS`
+shrinks it in tests only). Past the budget the turn renders what has landed — unbuilt lines carry the
+`(not summarized yet: zoom it)` recipe — while the remaining summaries finish in the background. Expiry is
+normal: no fault, no warning. Orders stay visible across an in-flight consolidation: while the checkpointed
+`pending` marker stands (ledger.json), the records the batch will consolidate render raw with retire targets
+applied, and the published ledger replaces them once the batch lands.
+
 ### Long-run rollover: deliberate recipe deviation
 
 The recipe assumes short turns and has no mid-run rule. OMP orchestration can remain in one run for hours,

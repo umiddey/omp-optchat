@@ -14,6 +14,12 @@ import { registerMemoryTools } from './tools.ts';
 import { AgentIndex } from './agents.ts';
 import type { CacheState } from './cache.ts';
 
+/** OMP caps every extension handler at 30 s (extensions/runner.ts EXTENSION_HANDLER_TIMEOUT_MS) and keeps the unprojected
+ * session history when a `context` handler crosses the cap, so the wait for summaries is bounded at 25 s. Past the budget
+ * the turn renders what has landed (unbuilt lines carry the zoom recipe) while the remaining builds continue in the
+ * background. OMP_OPTCHAT_SETTLE_BUDGET_MS shrinks the budget in tests only; production keeps the constant. */
+export const SETTLE_BUDGET_MS = 25_000;
+
 export default function optchat(pi: ExtensionAPI) {
   pi.registerFlag('optchat', { type: 'string', description: 'Use a never-ending OptChat memory profile (main agent only)' });
   let memory: Memory | undefined, release: (() => Promise<void>) | undefined;
@@ -38,6 +44,22 @@ export default function optchat(pi: ExtensionAPI) {
     return memory;
   };
   const flush = () => { const m = required(); while (logged < run.length) { logMessage(m, run[logged]); logged++; } };
+  const settleBudget = () => {
+    const injected = Number(process.env.OMP_OPTCHAT_SETTLE_BUDGET_MS);
+    return Number.isSafeInteger(injected) && injected > 0 ? injected : SETTLE_BUDGET_MS;
+  };
+  /** Waits for the summaries at most SETTLE_BUDGET_MS: OMP caps every extension handler at 30 s and keeps the unprojected
+   * history when a `context` handler crosses it. Past the budget (or once settle finishes) the caller renders; the
+   * background work is left running. The working message shows as today, and expiry is normal, not a fault. */
+  const waitSummaries = async (m: Memory, ctx: ExtensionContext) => {
+    const show = () => ctx.ui.setWorkingMessage(`Waiting for OptChat summaries…${m.lastError ? ` ${m.lastError}` : ''}`);
+    show(); const unsubscribe = m.onChange(show);
+    try {
+      const budget = Promise.withResolvers<void>();
+      const timer = setTimeout(budget.resolve, settleBudget());
+      try { await Promise.race([m.settle(controller.signal), budget.promise]); } finally { clearTimeout(timer); }
+    } finally { unsubscribe(); ctx.ui.setWorkingMessage(); }
+  };
   // context can precede fire-and-forget message_end. Claim before awaiting image I/O so catch-up cannot log twice.
   const recordMessage = async (original: AgentMessage, ctx: ExtensionContext) => {
     const key = `${original.role}:${original.timestamp}:${original.role === 'toolResult' ? original.toolCallId : original.role === 'custom' ? original.customType : ''}`;
@@ -114,9 +136,7 @@ export default function optchat(pi: ExtensionAPI) {
     try {
       const m = required();
       if (running && view === undefined) {
-        const show = () => ctx.ui.setWorkingMessage(`Waiting for OptChat summaries…${m.lastError ? ` ${m.lastError}` : ''}`);
-        show(); const unsubscribe = m.onChange(show);
-        try { await m.settle(controller.signal); } finally { unsubscribe(); ctx.ui.setWorkingMessage(); }
+        await waitSummaries(m, ctx);
         view = m.render(); orders = m.orders?.render() ?? ''; flush();
       }
       // OMP emits message_end fire-and-forget, so the first request of a run can arrive before runFirst is set.
@@ -138,9 +158,7 @@ export default function optchat(pi: ExtensionAPI) {
             // Flush even messages whose message_end has not run yet, before waiting for their summaries.
             for (const message of event.messages.slice(at, next)) await recordMessage(message, ctx);
             flush();
-            const show = () => ctx.ui.setWorkingMessage(`Waiting for OptChat summaries…${m.lastError ? ` ${m.lastError}` : ''}`);
-            show(); const unsubscribe = m.onChange(show);
-            try { await m.settle(controller.signal); } finally { unsubscribe(); ctx.ui.setWorkingMessage(); }
+            await waitSummaries(m, ctx);
             view = m.render(); orders = m.orders?.render() ?? ''; cut = event.messages[next]; from = next;
           }
         }

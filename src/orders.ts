@@ -520,6 +520,18 @@ recordAll(scanned: ReadonlyMap<number, readonly OrderDirective[]>, context = '')
    void work.finally(() => signal.removeEventListener('abort', abort));
   })]);
  }
- render() { return renderOrders([...this.ledger.items, ...this.raw].filter(item => !retired(item, this.retire)), this.ledger.through); }
+ render() {
+  const pendingThrough = this.pendingThrough;
+  // While a checkpointed batch has not landed, the records it will consolidate are not in the ledger yet: their standing
+  // orders render raw (retire targets applied), so every order from merged-away messages up to the batch point stays
+  // visible; once the batch lands only the published ledger shows.
+  const pending = pendingThrough !== undefined && pendingThrough > this.ledger.through
+   ? [...this.open].filter(i => i <= pendingThrough && !this.raw.some(item => item.from.includes(i))).flatMap(i => {
+    const record = this.records.get(i);
+    return record ? record.orders.flatMap(order => 'retire' in order ? [] : [ledgerItem({ ...order, from: [record.i], date: record.date })]) : [];
+   })
+   : [];
+  return renderOrders([...this.ledger.items, ...this.raw, ...pending].filter(item => !retired(item, this.retire)), this.ledger.through);
+ }
  async close() { this.stopped = true; this.controller.abort(); await Promise.all([this.publication, this.bootstrap, this.replay ?? Promise.resolve(), this.draining, this.migrationWork]); }
 }
