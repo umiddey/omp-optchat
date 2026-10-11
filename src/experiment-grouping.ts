@@ -116,24 +116,27 @@ export function oversizedUnits(units: readonly GroupUnit[]): GroupUnit[] {
 export interface RetrievalCheck { sourceId: string; pass: boolean; detail: string }
 export interface RetrievalAccessor { zoom(id: number, n: number): string }
 
-/** The lines the shipped logging writes for one unit, each tagged with the source message it came from — the exact
- * strings retrieval must find, attributable per fixture message. */
+/** The original content lines of one unit, each tagged with its source message: the exact text/toolCall/result
+ * payloads the shipped logging writes (transcript.ts logMessage conventions), WITHOUT an invented kind prefix —
+ * kind prefixes differ between message-level entries (tool/talk/echo) and grouped units, and the logged-fidelity
+ * half of the check pins those per mode. */
 function expectedLines(unit: GroupUnit): { sourceId: string; line: string }[] {
-  const entry = unitEntry(unit);
-  if (!entry) return [];
-  if (unit.messages.length === 1) return [{ sourceId: unit.sourceIds[0], line: `${entry.kind}: ${entry.text}` }];
   const lines: { sourceId: string; line: string }[] = [];
-  const [assistant] = unit.messages;
-  if (assistant.role === 'assistant')
-    for (const block of assistant.content) {
-      if (block.type === 'text' && block.text.trim()) lines.push({ sourceId: unit.sourceIds[0], line: block.text });
-      if (block.type === 'toolCall') lines.push({ sourceId: unit.sourceIds[0], line: `${block.name} ${JSON.stringify(block.arguments)}` });
+  unit.messages.forEach((message, index) => {
+    const sourceId = unit.sourceIds[index] ?? unit.sourceIds[0];
+    if (message.role === 'user') { lines.push({ sourceId, line: textContent(message.content) }); return; }
+    if (message.role === 'custom') { lines.push({ sourceId, line: `[${message.customType}] ${textContent(message.content)}` }); return; }
+    if (message.role === 'toolResult') {
+      const name = String(message.toolName), body = textContent(message.content, name !== 'zoom');
+      const text = body.length > CAP ? `${body.slice(0, CAP)}\n[${body.length - CAP} characters omitted]` : body;
+      lines.push({ sourceId, line: `${name}: ${text}` });
+      return;
     }
-  unit.messages.slice(1).forEach((result, k) => {
-    if (result.role !== 'toolResult') return;
-    const name = String(result.toolName), body = textContent(result.content, name !== 'zoom');
-    const text = body.length > CAP ? `${body.slice(0, CAP)}\n[${body.length - CAP} characters omitted]` : body;
-    lines.push({ sourceId: unit.sourceIds[k + 1], line: `${name}: ${text}` });
+    if (message.role !== 'assistant') return;
+    for (const block of message.content) {
+      if (block.type === 'text' && block.text.trim()) lines.push({ sourceId, line: block.text });
+      if (block.type === 'toolCall') lines.push({ sourceId, line: `${block.name} ${JSON.stringify(block.arguments)}` });
+    }
   });
   return lines;
 }

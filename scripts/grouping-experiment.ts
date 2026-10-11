@@ -196,6 +196,12 @@ async function replayMode(
   background.pending = open.size;
   background.damaged += rows.damaged;
   if (open.size > 0 || rows.error !== undefined) background.incomplete = 1;
+  // The first consolidation batch can run before later tree nodes scan older messages (batch skips
+  // through <= ledger.through), leaving freshly extracted records unpublished. A new note raises the
+  // message count; an explicit real batch through the new last id consolidates them into the ledger.
+  memory.append('note', 'Publish trigger: benchmark note after the initial settle, raising the batch point.');
+  await memory.orders?.batch(memory.root.length - 1);
+  await memory.orders?.settle(settleController.signal, true);
   const viewText = memory.render();
   const ordersRendered = memory.orders?.render() ?? '';
   const orderResults = orderChecks(ordersRendered, fixture.expectedOrders, byMessage);
