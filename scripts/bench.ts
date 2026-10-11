@@ -411,7 +411,6 @@ async function runOnce(args: Args, workload: Workload, mode: 'native' | 'optchat
   const name = `${mode}-rep${rep}`;
   const runDir = join(outDir, name);
   const cwd = join(runDir, 'cwd');
-  // Fresh per-run home: OptChat profile state (log/tree/view/orders) must never leak across reps or modes.
   const home = join(runDir, 'home');
   const measure = join(runDir, 'measure');
   const dump = join(runDir, 'payloads');

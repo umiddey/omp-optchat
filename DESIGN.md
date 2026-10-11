@@ -2,7 +2,7 @@
 
 OptChat (Victor Taelin's recipe) as an OMP 18.8.3 extension. One chat that never ends: every message is
 logged, compressed into a binary tree of ≤512-byte lines, and each turn the model sees
-`[tools][system][orders][view][current turn]` instead of the OMP session history.
+`[tools][system][view][current turn]` instead of the OMP session history.
 
 Sources (read-only references):
 - Recipe: https://gist.github.com/VictorTaelin/91837951a5ce5b38f341ec1ba1df6449 (the spec; section numbers below refer to it).
@@ -39,7 +39,7 @@ their results are logged like any tool result.
 
 The compaction prompt follows recipe §5 verbatim, renaming Unii→OptChat and unii→talk
 (the persisted reply kind). The device-tools paragraph is omitted because this extension exposes no device tools.
-The turn prompt adds a static standing-orders paragraph; compaction tasks, the ruler, and too-long retry text follow §4 verbatim.
+Compaction tasks, the ruler, and too-long retry text follow §4 verbatim.
 New nodes use the restored prompt; persisted nodes are never rebuilt or migrated.
 
 Compactors deliberately send their own system prompt, without OMP's system instructions or tools.
@@ -62,147 +62,12 @@ messages of the same kind and date, without splitting surrogate pairs. The recip
 specify a chunk size; we use the tool-output character budget. Tool output is still clipped
 head/tail, not split. Existing long messages remain readable through paged zoom.
 
-Our reading of “view passes 128,000 bytes” is the sum of node text sizes (flat
+Our reading of "view passes 128,000 bytes" is the sum of node text sizes (flat
 UTF-8 summary content), excluding `id+n|` labels, separators, and the `<chat>` envelope.
 The same accounting applies to the 64 KB low bound and 16–32 KB compaction view.
 The recipe's node records store `size`, but its prose is ambiguous about framing.
 We deliberately keep existing accounting: framing is a few percent and changing it
 would rewrite an existing profile's view and invalidate its cache continuity.
-
-### Deliberate extension: standing orders outside the tree
-
-The recipe's time-shaped merges squeeze two 512-byte lines into one. In the owner's measured
-case, message 24's full PM goal shortened at 16+16 and disappeared at 0+32. A replay of
-135 compactions retained only 16/30 lost orders, and 0/18 full PM goals, even with the exact
-recipe prompt and Haiku xhigh. Prompt tuning cannot provide durable standing-order storage.
-
-`src/orders.ts` therefore owns an append-only orders log and an atomic ledger. This is our extension: it
-costs one model call fewer per user message, because standing orders are no longer extracted by a
-separate per-message call. Each user log entry (excluding any `[customType] ` shown-message prefix) is
-scanned by a summarizer call that already reads it: a user message longer than 512 bytes by its own leaf
-call, a shorter one by the first merge call whose input contains its verbatim text. The summarizer task
-text is the recipe's compaction task, verbatim, with an appended section only when the node covers
-unscanned user messages. That section lists their ids and asks for a final `ORDERS:` line holding one
-JSON object `{"<id>": [orders...]}`, with empty arrays allowed. The 512-byte limit and the `tooLong`
-retries apply to the line before `ORDERS:` only. Orders come from the accepted reply, else from the first
-reply in the same call with valid ORDERS JSON; if none is valid, the messages stay unscanned for the next
-covering call. The summarizer sees the 16–32 KB compaction view around each message, so speech-to-text
-slips are resolved from context. Each order is `{said, text, kind, until?}`: `said` is the user's words and
-`text` a clean restatement. Records are written before the node that covers them is appended, so restarts
-keep them. The former per-message path is kept only for one-time history backfill (`EXTRACT_ORDERS`,
-batched up to 20 messages with ≤2 KB of neighbouring talk as context), covering ids already built into
-nodes before this version. Saved ledgers are never recomputed on restart.
-
-Consolidation (at a view batch) restates each order as one clear, self-contained sentence or two, merging an
-order spread over several messages into one item and fixing typos and names (`gatefoge` → `Gateforge`).
-Consolidation and backfill use `medium` thinking regardless of the compactor's setting. A user choice that sets a
-lasting goal/rule/policy may resolve its reference as `"user's words" (chosen: option text from reply)`.
-Context never supplies an order by itself. Task-scoped assignments, operations and deployment
-approvals remain excluded: standing orders apply beyond the current task.
-
-Consolidation restates each order as one clear, self-contained sentence or two, merging an order spread
-over several messages into one item and fixing typos and names (`gatefoge` → `Gateforge`). It must not
-interpret, speculate or add commentary; its only allowed annotations are `(replaces msg N)` and the
-already-extracted `(chosen: ...)` text. Restating never drops a condition: code checks that every
-previous ledger item is explicitly owned by exactly one output item through `covers: [zero-based old item indexes]`.
-Newly extracted orders retain source-id hard-token coverage. Must-keep tokens are numbers, paths, URLs, ids,
-code-ish tokens, condition words (including `not`/`no` and contractions), acronyms and capitalised names.
-Names of five or more letters tolerate edit distance 2; a name resolved from supplied source context can count
-as kept. Negations may retain meaning through contractions or `never`/`no` and `zero`/`0`/`none`/`without`.
-Plain lowercase content-word overlap is not a guard. A new-record gap retries with actual missing tokens; after the
-last attempt only the failing order falls back to its verbatim text, with one warning. `zoom(id, 1)`
-shows the user's exact words. Prompt contracts are measured by real-model replay; the guard is code.
-An omitted, multiply covered, kind-changing or hard-token-losing old item is kept verbatim. If a merged
-output fails one member, that member leaves the merge and keeps its own sources/kind/done-condition;
-the passing members remain merged. Sharing a message id is never an ownership mapping.
-
-Extraction records contain `{said,text,kind:"rule"|"goal",until?:string}` or
-`{retire:[text or numeric source ids]}`. Legacy string records and objects without `said` load as rules/typed
-orders without rewriting history; old untyped ledger items likewise load as rules. Rules describe continuing work policy;
-goals carry user-worded/resolved done-conditions, never an invented expiration. User completion,
-drop or retirement messages (including contextual "yes retire it") are the only retirement
-authority. Assistant status and model judgement are not.
-
-Consolidation applies recorded retirement targets (numeric source ids or identifying text, matched word
-by word) and validates coverage of existing items and newly extracted orders by the guard above, unless
-the user retires them or a newer user directive explicitly replaces them. Replacement annotations must
-reference the earlier source id, cover the specific old item index, and have a newer user-order source.
-An explicit retirement may omit its target; other missing indexes are kept verbatim, not retired by the model.
-Failed consolidation keeps active old/raw orders and applies explicit user retirement targets, durably saved in the
-optional `retire` field beside `raw`; history remains append-only.
-Each pending retirement carries its user message id (`{i,retire:[targets]}`). Matching source ids
-or identifying text can remove only items whose newest source is not later than that retirement:
-a newer user can reintroduce the same order in the same batch. Eligibility is decided before
-rule/goal typing; classifying a local implementation plan as a goal does not make it standing.
-Persistent coverage/gate-scope, retention, access and default choices are policy changes, not
-single-command approvals.
-User-authorized replacement is distinct from model-owned expiry. An order is replaced only if
-the user says it changes/replaces it, or both cannot be followed at the same time. Overlap and
-broader goals are not replacements; ambiguous tension keeps both orders as separate items without an
-interpretation for the turn model/owner to resolve. A truly incompatible goal can be replaced
-before completion, with the newer order's replacement annotation; unrelated goals stay.
-Empty extractions and retirement-only messages cannot be credited as new standing-order sources.
-
-Legacy ledger migration restates the CURRENT ledger items, not extraction history. It runs once in the
-background in batches of at most 20 items at medium effort. Each input item carries its explicit index,
-text/kind/done-condition/source ids and source user words plus nearby assistant talk (each talk ≤2048
-UTF-8 bytes) for resolution only. Historical records that were replaced or retired are not candidates,
-so they cannot be resurrected. `orders.jsonl` is byte-untouched by migration; duplicate records still reject.
-
-The model returns one `{index,text,kind,until?}` per item or `{indexes:[...],text,kind,until?}` for true
-duplicates. Every input index must occur exactly once. Each group member independently retains its old
-text's hard tokens and kind, and its done-condition's hard tokens. Invalid/missing/duplicate indexes or
-failing members keep the old item verbatim with a reason; failing members are pulled out of merge groups.
-Successful groups union source ids and use the newest source's date.
-
-Prepared migration does not change rendered bytes. The next view batch consolidates it with newly
-extracted records and atomically publishes `migrationDone: true` in `ledger.json`. A restart after that
-marker never migrates again; a restart before publication can prepare it again. No superseding extraction
-records, content-word heuristic, aliases or migration compatibility paths remain.
-The token guard ignores shouted profanity/emphasis and trailing "and all that" filler, not actual quantified
-`all` obligations or `NEVER`. Acronym plurals (PR→PRs) preserve the name; unrelated acronyms do not.
-
-Render uses `<orders through="N">`, then `id [rule] (date): text` or
-`id [goal until: user-worded condition] (date): text`. Unspecified conditions render `[goal]`,
-never a fabricated condition. The static turn paragraph says orders are current as of N;
-newer user words in the view can change/retire them and take precedence. On apparent goal
-completion the agent must reply with evidence and ask the user whether to retire it, never
-remove it on its own. Header, kinds and conditions remain byte-stable between batches.
-OMP still sends context files (AGENTS.md) in the system prompt; OptChat neither adds nor removes them. The same
-paragraph sets their precedence against orders: repetition is normal; on a true conflict the newer date wins (the
-order's rendered date vs the date written beside the context-file rule); undated or unsettled, the model asks the
-user. Deduplicating the ledger against context files is deliberately not done: it would silently drop an order the
-user later deletes from the file.
-
-Only a chat view merge batch publishes subsequent ledger changes. Its inclusive message point
-selects open extraction records through `P`; the turn waits for background migration, extraction and consolidation
-at that boundary, like summary completion. New view and ledger are captured together for the
-run. Later contradictions revoke/replace older wording; duplicates merge with source ids.
-The rendered consolidated block must be <=16000 UTF-8 bytes; validation rejects, not truncates,
-oversized output. Three failed attempts retain old ledger plus raw new orders; `ledger.json`'s
-optional `raw` field durably preserves this fallback without advancing `through`. Next batch
-tries again. A lossless failure fallback may exceed the normal consolidated bound.
-
-Batch requests are durable. Calling `batch(P)` synchronously and atomically writes
-`pending: P` into `ledger.json` — keeping `through`, `items`, `raw` and `retire` — before the
-merge that requested it can save `view.json`, so no crash window can hold a merged view whose
-consolidation is unmarked. `Orders` is attached before `Memory`'s constructor replays the saved
-view and its backfill runs there, so startup merges checkpoint too (and wait for their
-extractions, since `through` may only advance over persisted records). A consolidation that
-lands while a newer batch is already checkpointed re-stamps that newer `pending`, keeping the
-marker contiguous. `close()` aborts the model call but never drops the marker. At open, saved
-`pending` greater than `through` replays as blocking work — extraction of the range, then
-consolidation — and the first turn's settle waits for it; a restart with no pending work and an
-existing ledger consolidates nothing, leaving the orders block byte-identical. Only a profile's
-very first ledger (backfill with no ledger at all) stays background. If the replayed or next
-consolidation fails all three attempts again, raw orders for `(through, pending]` render and
-`pending` stands for the next attempt.
-
-The `<orders>` text block precedes the separate `<chat>` block in the same opening user message.
-Cache splitting still starts at `<chat>` and uses the identical four-line partition; no ledger
-line shifts a view cache mark. The static turn paragraph contains no dates. Tools/system retain
-their own fallback mark. Between view rewrites the orders bytes are identical; the first backfill
-publication permits one cache rewrite. The ledger never modifies tree nodes or rebuilds the view.
 
 
 ## Turn integration (OMP hooks)
@@ -239,10 +104,7 @@ publication permits one cache rewrite. The ledger never modifies tree nodes or r
 unprojected session history when a `context` handler crosses it, so both settle waits (1 and the rollover)
 race `memory.settle(signal)` against a 25 s budget (`SETTLE_BUDGET_MS`; `OMP_OPTCHAT_SETTLE_BUDGET_MS`
 shrinks it in tests only). Past the budget the turn renders what has landed — unbuilt lines carry the
-`(not summarized yet: zoom it)` recipe — while the remaining summaries finish in the background. Expiry is
-normal: no fault, no warning. Orders stay visible across an in-flight consolidation: while the checkpointed
-`pending` marker stands (ledger.json), the records the batch will consolidate render raw with retire targets
-applied, and the published ledger replaces them once the batch lands.
+`(not summarized yet: zoom it)` recipe — while the remaining summaries finish in the background. Expiry is normal: no fault, no warning.
 
 ### Long-run rollover: deliberate recipe deviation
 
@@ -335,7 +197,7 @@ Invariants (tests must enforce):
 - I1 Within a run, request k+1's block sequence (tools → system → messages, `cache_control` stripped) starts with
   request k's full sequence except OMP-appended per-call tail blocks.
 - I2 Across runs without a batch merge, run N+1's first request shares with run N's requests every block up to
-  and including the old view's last whole block, and one of run N's marks lies in that shared prefix within 20
+  and including the old view's last whole block, and one of N's marks lies in that shared prefix within 20
   blocks before a mark of run N+1.
 - I3 A batch merge (view > 128,000 bytes → ≤ 64,000) is the only event allowed to break I2; at most once per batch.
 - I4 System prompt bytes identical across all runs of one session/cwd (OptChat block static; `<memories>` gone).

@@ -147,12 +147,3 @@ describe('checkRetrieval', () => {
   });
 });
 
-describe('fixture expectations', () => {
-  test('fixture declares facts, orders and an order question for the live checks', () => {
-    const parsed: unknown = JSON.parse(readFileSync(fixturePath, 'utf8'));
-    expect(record(parsed)).toBe(true);
-    expect(record(parsed) && Array.isArray(parsed.facts) && parsed.facts.length >= 3).toBe(true);
-    expect(record(parsed) && Array.isArray(parsed.expectedOrders) && parsed.expectedOrders.length >= 1).toBe(true);
-    expect(record(parsed) && record(parsed.orderQuestion) && typeof parsed.orderQuestion.expect === 'string').toBe(true);
-  });
-});

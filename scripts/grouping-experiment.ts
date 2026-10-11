@@ -5,7 +5,7 @@ import { ThinkingLevel, type AgentMessage } from '@oh-my-pi/pi-agent-core';
 import { ModelRegistry, Settings, discoverAuthStorage } from '@oh-my-pi/pi-coding-agent';
 import { Memory, NODE } from '../src/memory.ts';
 import type { Entry } from '../src/memory.ts';
-import { createCompressor, createOrderTask, reasoningFor, type ModelChoice } from '../src/compactor.ts';
+import { createCompressor, reasoningFor, type ModelChoice } from '../src/compactor.ts';
 import { logMessage } from '../src/transcript.ts';
 import { checkRetrieval, groupTranscript, oversizedUnits, unitEntry,
   type GroupUnit, type RetrievalCheck } from '../src/experiment-grouping.ts';
@@ -13,14 +13,13 @@ import { record } from '../src/cache.ts';
 import { openMeasurement, readUsageLog } from '../src/measurement.ts';
 
 /** Isolated grouped-tool-exchange experiment (EXPERIMENTAL — no production grouping, no flag, no cutover): the same
- * recorded fixture transcript is replayed into two real Memory profiles with the real compressor and real order
- * task (model registry actual APIs, temp profile homes) — once with the shipped message-level logging and once with
- * each assistant message grouped with its own tool results. The experiment then asserts, per mode: exact source
- * retrieval through zoom (full source ID map, originals preserved verbatim), retained standing orders in the real
- * orders ledger, and live model answers to factual questions asked from the rendered compressed view — so exact
- * source preservation is never equated with memory quality. Calls and usage of every compactor/order invocation are
- * counted per mode via the compressor's onUsage; QA calls are counted separately. Units over the 512-byte node
- * budget force real summarization. */
+ * recorded fixture transcript is replayed into two real Memory profiles with the real compressor (model registry
+ * actual APIs, temp profile homes) — once with the shipped message-level logging and once with each assistant
+ * message grouped with its own tool results. The experiment then asserts, per mode: exact source retrieval through
+ * zoom (full source ID map, originals preserved verbatim) and live model answers to factual questions asked from
+ * the rendered compressed view — so exact source preservation is never equated with memory quality. Calls and usage
+ * of every compactor invocation are counted per mode via the compressor's onUsage; QA calls are counted separately.
+ * Units over the 512-byte node budget force real summarization. */
 
 const ROOT = resolve(import.meta.dir, '..');
 const SETTLE_TIMEOUT_MS = 10 * 60_000;
@@ -31,7 +30,6 @@ interface FixtureFact { id: string; answer: string; question: string }
 interface Fixture {
   description: string;
   messages: AgentMessage[];
-  expectedOrders: { text: string; kind: string; from: number; expectTokens: string[]; negations?: string[] }[];
   facts: FixtureFact[];
   orderQuestion: { question: string; expect: string };
 }
@@ -42,9 +40,8 @@ function loadFixture(path: string): Fixture {
   // Fixture is a repo-owned file written against the AgentMessage shapes; the read-model cast keeps the replay typed.
   const messages = parsed.messages as Fixture['messages'];
   const facts = Array.isArray(parsed.facts) ? parsed.facts as FixtureFact[] : [];
-  const expectedOrders = Array.isArray(parsed.expectedOrders) ? parsed.expectedOrders as Fixture['expectedOrders'] : [];
   const orderQuestion = record(parsed.orderQuestion) ? parsed.orderQuestion as Fixture['orderQuestion'] : { question: '', expect: '' };
-  return { description: typeof parsed.description === 'string' ? parsed.description : '', messages, expectedOrders, facts, orderQuestion };
+  return { description: typeof parsed.description === 'string' ? parsed.description : '', messages, facts, orderQuestion };
 }
 
 async function openRegistry(): Promise<{ registry: ModelRegistry; close: () => void }> {
@@ -78,8 +75,6 @@ interface ModeResult {
   viewText: string;
   retrieval: RetrievalCheck[];
   retrievalPassed: boolean;
-  ordersRendered: string;
-  ordersFailed: { expect: string; missingTokens: string[] }[];
   qa: { id: string; question: string; expected: string; answer: string; pass: boolean; error?: string }[];
   qaPassed: boolean;
   qaIncomplete: boolean;
@@ -88,28 +83,6 @@ interface ModeResult {
   settled: boolean;
 }
 
-/** Ledger semantics check per fixture order: the restated render must carry the order's kind marker and source
- * message id (`<from> [kind`), plus EVERY expected token (case-insensitive). Bare single-word probes can pass an
- * opposite or partial restatement; missing tokens are reported explicitly. */
-function orderChecks(rendered: string, orders: Fixture['expectedOrders'], fromMap: readonly (readonly number[])[]) {
-  const lower = rendered.toLowerCase();
-  return orders.map(order => {
-    // The source id in the render is the LOG entry the fixture message landed on in THIS mode, not the fixture index.
-    const logIndex = fromMap[order.from]?.[0];
-    const anchor = logIndex === undefined ? null : `${logIndex} [${order.kind}`;
-    const needles: string[] = order.expectTokens.map(token => token.toLowerCase());
-    // Goals must keep their done-condition (`until:`) and must not gain forbidden phrasing.
-    if (order.kind === 'goal') needles.push('until:');
-    const missingTokens = [
-      ...(anchor === null ? [`source id for message ${order.from} not mapped in this mode`]
-        : lower.includes(anchor.toLowerCase()) ? [] : [anchor.toLowerCase()]),
-      ...needles.filter(needle => !lower.includes(needle)),
-      ...(order.negations ?? []).filter(word => lower.includes(word.toLowerCase())).map(word => `negation present: ${word}`),
-    ];
-    return { expect: `${order.kind} from message ${order.from}${logIndex !== undefined ? ` (log ${logIndex})` : ''}: ${order.text}`,
-      missingTokens, pass: missingTokens.length === 0 };
-  });
-}
 
 async function replayMode(
   mode: 'message-level' | 'grouped', fixture: Fixture, units: GroupUnit[],
@@ -123,10 +96,10 @@ async function replayMode(
   const measurement = openMeasurement(directory, () => {});
   const background = emptyCount();
   // A deliberately small view budget (a real Memory.open parameter) forces the same sawtooth merges production
-  // needs for orders batches, so the fixture's standing orders go through real extraction AND consolidation.
+  // needs, so the fixture's notes go through real summarization and merges before settle.
   const budget = 4096;
   const memory = await Memory.open(directory, createCompressor(registry, choice, () => {}, undefined, measurement.invoke),
-    () => {}, budget, undefined, createOrderTask(registry, choice, () => {}, measurement.invoke));
+    () => {}, budget, undefined);
   // Per-message log indexes first: message-level replay can append several entries per message; grouped appends
   // exactly one per unit. Then map units onto the union of their source messages' indexes (the source ID map).
   const byMessage: number[][] = [];
@@ -152,7 +125,7 @@ async function replayMode(
     .flatMap(id => byMessage[Number(id.slice(1))] ?? [])
     .map(index => memory.root[index]?.text ?? ''));
   // Force the sawtooth over the small budget with deterministic filler notes (same for both modes), so the fixture
-  // orders go through real extraction, real merges, real batches and real consolidation before settle.
+  // notes go through real merges before settle.
   for (let note = 0; note < 40; note++)
     memory.append('note', `Filler note ${note}: benchmark volume for merge forcing; token ${note} is deterministic.`);
   const retrieval = checkRetrieval(units, unitIndexes, memory, logged);
@@ -197,16 +170,7 @@ async function replayMode(
   background.pending = open.size;
   background.damaged += rows.damaged;
   if (open.size > 0 || rows.error !== undefined) background.incomplete = 1;
-  // The first consolidation batch can run before later tree nodes scan older messages (batch skips
-  // through <= ledger.through), leaving freshly extracted records unpublished. A new note raises the
-  // message count; an explicit real batch through the new last id consolidates them into the ledger.
-  memory.append('note', 'Publish trigger: benchmark note after the initial settle, raising the batch point.');
-  await memory.orders?.batch(memory.root.length - 1);
-  await memory.orders?.settle(settleController.signal, true);
   const viewText = memory.render();
-  const ordersRendered = memory.orders?.render() ?? '';
-  const orderResults = orderChecks(ordersRendered, fixture.expectedOrders, byMessage);
-  const ordersPassed = fixture.expectedOrders.length > 0 && orderResults.every(order => order.pass);
   const qa: ModeResult['qa'] = [];
   const qaUsage = emptyCount();
   if (settled) {
@@ -214,9 +178,9 @@ async function replayMode(
     const qaModel = registry.find(selected.provider, selected.model);
     if (!qaModel) throw new Error(`Compactor model unavailable: ${selected.provider}/${selected.model}`);
     const ask = async (question: string) => {
-      // The context is delivered exactly once, in the user message (orders ledger, then the rendered view, then the
+      // The context is delivered exactly once, in the user message (the rendered view, then the
       // question); the system prompt is a static evaluator instruction so the view is never billed twice.
-      const context = `${ordersRendered ? `${ordersRendered}\n\n` : ''}${viewText}\n\n${question}`;
+      const context = `${viewText}\n\n${question}`;
       const messages: Message[] = [{ role: 'user', content: context, timestamp: Date.now() }];
       const reply = await streamSimple(qaModel, { systemPrompt: [QA_EVALUATOR_PROMPT], messages }, {
         apiKey: await registry.getApiKey(qaModel), sessionId: 'optchat-grouping-qa',
@@ -251,7 +215,7 @@ async function replayMode(
     oversizedUnitCount: oversizedUnits(units).length, nodes: memory.tree.size,
     viewBytes: memory.size, viewText, retrieval,
     retrievalPassed: retrieval.length > 0 && retrieval.every(check => check.pass),
-    ordersRendered, ordersFailed: orderResults.filter(order => !order.pass), qa,
+    qa,
     qaPassed: settled && qa.length > 0 && qa.every(item => item.pass),
     qaIncomplete: qa.some(item => item.error !== undefined) || qaUsage.errors > 0,
     background, qaUsage, settled,
@@ -294,7 +258,7 @@ async function main() {
       const result = await replayMode(mode, fixture, units, registry, choice, home);
       results.push(result);
       console.log(`[${mode}] entries ${result.entries}; nodes ${result.nodes}; view ${result.viewBytes}B; settled ${result.settled}`);
-      console.log(`[${mode}] retrieval ${result.retrievalPassed ? 'PASS' : 'FAIL'}; orders ${result.ordersFailed.length === 0 ? 'PASS' : 'FAIL'}; live QA ${result.qaPassed ? 'PASS' : 'FAIL'} (${result.qa.filter(q => q.pass).length}/${result.qa.length}); compactor calls ${result.background.calls}`);
+      console.log(`[${mode}] retrieval ${result.retrievalPassed ? 'PASS' : 'FAIL'}; live QA ${result.qaPassed ? 'PASS' : 'FAIL'} (${result.qa.filter(q => q.pass).length}/${result.qa.length}); compactor calls ${result.background.calls}`);
       for (const item of result.qa)
         console.log(`[${mode}] QA ${item.id}: ${item.pass ? 'pass' : `FAIL — expected ${item.expected}, got: ${item.answer.slice(0, 120)}${item.error ? ` (${item.error})` : ''}`}`);
     }
@@ -307,7 +271,6 @@ async function main() {
     viewBytesDelta: grouped.viewBytes - messageLevel.viewBytes,
     nodesDelta: grouped.nodes - messageLevel.nodes,
     exactSourceRetrievalBoth: messageLevel.retrievalPassed && grouped.retrievalPassed,
-    ordersRetainedBoth: messageLevel.ordersFailed.length === 0 && grouped.ordersFailed.length === 0,
     liveQAMessageLevel: `${messageLevel.qa.filter(q => q.pass).length}/${messageLevel.qa.length}`,
     liveQAGrouped: `${grouped.qa.filter(q => q.pass).length}/${grouped.qa.length}`,
     note: 'Exact source preservation (zoom retrieval) is reported separately from live compressed-view QA; they are not the same measurement.',

@@ -83,88 +83,20 @@ Existing profile configs keep their explicit effort. New prompts affect only new
 sessions. Off, the view and `zoom` are the only memory and each turn start writes about 1k fewer tokens to the cache.
 Plain OMP sessions keep their recall either way; OMP still saves facts from OptChat sessions for them.
 
-## Standing orders ledger
+## Cutover from ledger to normal history
 
-OptChat keeps standing goals, rules, constraints, prohibitions, preferences and decisions outside
-the summary tree, restated in clear wording. They appear as an `<orders through="N">` block before `<chat>` on every
-request. New orders remain in recent view lines until the next view merge batch, when the ledger
-is consolidated: orders are restated, duplicates and multi-message orders merge, and newest contradictory instructions replace earlier ones. A code guard checks that no condition, number, path or id is lost.
-The static prompt gives orders priority over conflicting summaries, but newer user messages can change or retire them and win. `zoom(id, 1)` gives context.
-Context files such as `AGENTS.md` stay your curated rulebook and are sent as OMP always sends them; a rule appearing
-there and in the ledger is normal. When the two truly conflict, the newer date wins (an order's date is in its line;
-a context-file rule's date is the one written beside it, e.g. "(owner 2026-10-11)"). Undated or unsettled: the model asks you.
-This is a deliberate extension beyond Taelin's recipe, not a change to existing summary nodes.
-
-No extra config: orders are scanned by the summarizer calls that already run, using `compactor`'s model
-and effort, so a user message costs one model call fewer than before. Each summarizer call that covers
-unscanned user messages gets a short appended task section and returns an `ORDERS:` JSON line beside its
-summary; the summary itself keeps the 512-byte rule. Because the summarizer reads the surrounding view,
-speech-to-text slips such as "stale scale" or "gatefoge" are resolved from context. Shown custom-message
-tags are ignored, and messages with no standing order are recorded as empty. Existing profiles backfill
-missing ids once in the background, batched; their first ledger appears at a subsequent turn start after
-completion. Normal turns do not wait for scanning; a view rewrite waits for its consolidation with the
-usual working message.
-
-Older profiles migrate their current standing-orders ledger once in the background, using source messages
-only to resolve wording. Historical orders already replaced or retired are never extracted again.
-`orders.jsonl` stays untouched; the ledger changes only at the next normal view batch and saves a
-`migrationDone` marker. Explicit item-index coverage prevents silent drops; a failing item stays verbatim,
-and one line per pass tells how many entries kept your wording and which words a rewording would have lost.
-Dictated capitals may be corrected (GROC → Grok, "open AI" → OpenAI, UITES → "UI test"); real acronyms
-(CP, PR, OIA) must stay exact.
-
-Standing means an instruction keeps applying beyond the current task. One-off agent assignments,
-action approvals, pushing a particular change, or installing/restarting it are not standing orders.
-To understand a short answer that chooses a lasting policy, the summarizer also sees the preceding
-assistant reply in the view. It may resolve the user's chosen option as `"user's words" (chosen: option
-text)`, but the reply is never itself a source of orders. Each order keeps the user's words (`said`) and a
-restated `text`; consolidation restates clearly, fixes typos and names, and keeps user wording rather than
-interpreting it, so it adds no explanatory notes beyond resolved-choice annotations and `(replaces msg N)`.
-
-Only the user's words create, change or retire an order. `rule` means how to work with no end;
-`goal` means something to achieve, with `until` holding its done-condition in the user's words
-or resolved from context. When the agent has evidence a goal is done, it must report that evidence
-and ask whether to retire it—not silently expire it. A user saying "that's done", "drop the MR
-watch", or "yes retire it" creates a retirement directive; the next batch removes targeted items.
-Retired instructions stay in extraction history but are not rendered.
-
-For example:
-```text
-<orders through="2681">
-24 [goal until: PM gate shows 0 missing/0 waived/0 baselined and PM pushed] (2026-10-09): Goal: every endpoint and table proven by a witnessed real UI test, 0 waived, 0 baselined; push PM when green locally
-2681 [rule] (2026-10-10): i can be okay with you pushing it with no verify but YOU HAVE TO ensure that we fix them eventually
-</orders>
-```
-If a goal has no user-specified or resolvable done-condition, it renders `[goal]` without
-inventing one. The `through` header changes only with ledger publication.
-
-Profile files:
-- `orders.jsonl`: append-only, flushed `{i,date,orders:[directives]}`. Directives are
-  `{said,text,kind:"rule"|"goal",until?:string}` (`said` is the user's words, `text` the restatement) or
-  `{retire:[text or numeric source ids]}`.
-  Legacy string entries load as `{text,kind:"rule"}` without rewriting the file. Read it as JSONL,
-  or use `jq -c 'select(.orders | length > 0)' ~/.omp/optchat/main/orders.jsonl`.
-- `ledger.json`: atomic `{through,items:[{text,kind,until?,from:[ids],date}]}` snapshot, loaded without
-  recomputation at restart. `through` is the inclusive last incorporated message id. Read active
-  instructions with `jq '.items' ~/.omp/optchat/main/ledger.json`; newest source id labels each item.
-  After failed consolidation, optional `raw` stores unconsolidated orders and `retire` stores
-  pending user retirement targets beside the old snapshot, so restart preserves the fallback.
-  A batch that has started but not landed also writes `pending: N` here, before the merge that
-  requested it can save the view, so a crash or a closed window can never lose it: the next start
-  re-runs that consolidation before the first request.
-
-Consolidated rendered orders are bounded to 16,000 UTF-8 bytes. Oversized or invalid outputs retry,
-never truncate. If consolidation fails three attempts, old instructions plus raw new orders are
-rendered losslessly (this fallback can exceed the bound), and consolidation retries at the next batch
-(or at the next start, while `pending` stands). Between batches the orders prefix is byte-identical,
-preserving the prompt cache. Closing OMP mid-consolidation aborts the model call but leaves `pending`
-on disk; the first turn after the restart waits for that consolidation, and only a profile's very
-first ledger (background backfill) may appear without a view rewrite.
+This version no longer maintains a standing-orders ledger. OptChat does not extract, backfill, migrate, or
+consolidate orders, and it does not inject orders into the conversation: user instructions live only in normal
+history and in the summaries that preserve them, so `zoom(id, 1)` still opens the original message that contains
+them. Existing profiles are not migrated: if an old `ledger.json` or `orders.jsonl` is present in the profile
+folder, OptChat ignores it and leaves it untouched — nothing is read, merged, or deleted. Because the turn
+prompt changes and the ledger is removed, the first view rewrite after upgrading triggers one cache
+transition; later turns resume the usual cache pattern.
 
 
 ## What it changes in OMP (only when the flag is set)
 
-- The model sees `[tools][system][orders][memory view][current turn]`; OMP's own history stays on disk but is not sent.
+- The model sees `[tools][system][memory view][current turn]`; OMP's own history stays on disk but is not sent.
 - OMP's auto-compaction is turned off for that session.
 - Per-turn memory recall (`<memories>`) is dropped (or, with `"memories": true`, moved after the view), and the
   date/cwd reminder is moved after the view, so neither invalidates the cached view.
@@ -223,7 +155,7 @@ bun scripts/grouping-experiment.ts --home /tmp/optchat-grouping-new \
   --compactor anthropic/claude-haiku-5-5 --thinking medium
 ```
 
-Use fresh output paths. Matched runs check factual recall, a standing order on replies and a filesystem
+Use fresh output paths. Matched runs check factual recall, reply compliance (ORCHID in every reply) and a filesystem
 artifact; an OptChat-only zoom probe runs separately and is excluded from comparative totals.
 `--repetitions N` repeats independent runs; `--workload long --turns N` adds long-context pressure, and
 `--compaction-threshold TOKENS` forces native OMP compaction at the same threshold in both modes.
@@ -237,9 +169,9 @@ them after every run, including failed ones. A killed runner can leave them behi
 private, so delete them before sharing. Do not run benchmarks on a private/live profile.
 
 The grouping experiment compares message-level logging with assistant-tool-call/result units, preserving
-source-id mapping and user/steering boundaries. It reports exact logged-source retrieval, ledger rule/goal
-preservation and live questions answered from the compressed context separately. Fewer calls are not a
-success if recall or orders degrade. Grouping is not enabled in production.
+source-id mapping and user/steering boundaries. It reports exact logged-source retrieval and live questions
+answered from the compressed context separately. Fewer calls are not a success if recall degrades. Grouping is
+not enabled in production.
 
 Release: bump `version` in `package.json`, commit and push, then `gh release create v<version> --generate-notes`.
 Publishing the GitHub release runs `.github/workflows/publish.yml`, which tests and publishes to npm (trusted

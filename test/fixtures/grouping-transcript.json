@@ -267,29 +267,6 @@
       "timestamp": 1760000016000
     }
   ],
-  "expectedOrders": [
-    {
-      "text": "every reply must include the word ORCHID",
-      "kind": "rule",
-      "from": 1,
-      "expectTokens": [
-        "ORCHID"
-      ]
-    },
-    {
-      "text": "until the migration is done, keep nightly backups of the deploy folder",
-      "kind": "goal",
-      "from": 1,
-      "expectTokens": [
-        "backups",
-        "nightly",
-        "migration"
-      ],
-      "negations": [
-        "delete"
-      ]
-    }
-  ],
   "facts": [
     {
       "id": "codeword",
