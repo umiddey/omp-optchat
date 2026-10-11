@@ -1,5 +1,6 @@
 import { appendFileSync, mkdirSync, writeFileSync, unlinkSync, promises as fs } from 'node:fs';
 import type { FileHandle } from 'node:fs/promises';
+import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import type { ExtensionAPI, ExtensionContext } from '@oh-my-pi/pi-coding-agent';
 import { lookup } from '@oh-my-pi/pi-coding-agent/config/registry';
@@ -28,13 +29,13 @@ export default function benchObserve(pi: ExtensionAPI) {
   }
   // Bun's compiled request-debug logger may lose a FileHandle before explicitly closing it.
   // Retain handles when used, not by replacing fs.open (compiled imports bind that function early).
-  // Benchmark-only: provider options and payloads stay untouched.
-  if (process.env.OMP_OPTCHAT_BENCH_DUMP && process.env.PI_REQ_DEBUG === '1') {
+  // Benchmark-only: provider options and payloads stay untouched. Needed in BOTH modes whenever PI_REQ_DEBUG is on
+  // (OptChat + --wire-debug crashed with "FileHandle closed during garbage collection" when this was native-only).
+  if (process.env.PI_REQ_DEBUG === '1') {
     const handles = new Set<FileHandle>();
     let restore = () => {};
     pi.on('session_start', async () => {
-      const path = join(process.env.OMP_OPTCHAT_BENCH_DUMP!, '.handle-probe');
-      mkdirSync(process.env.OMP_OPTCHAT_BENCH_DUMP!, { recursive: true, mode: 0o700 });
+      const path = join(tmpdir(), `optchat-handle-probe-${process.pid}-${crypto.randomUUID()}`);
       const sample = await fs.open(path, 'w', 0o600);
       const prototype = Object.getPrototypeOf(sample) as FileHandle;
       await sample.close(); unlinkSync(path);

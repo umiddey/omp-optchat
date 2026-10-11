@@ -101,7 +101,8 @@ function orderChecks(rendered: string, orders: Fixture['expectedOrders'], fromMa
     // Goals must keep their done-condition (`until:`) and must not gain forbidden phrasing.
     if (order.kind === 'goal') needles.push('until:');
     const missingTokens = [
-      ...(anchor === null ? [`source id for message ${order.from} not mapped in this mode`] : [anchor.toLowerCase()]),
+      ...(anchor === null ? [`source id for message ${order.from} not mapped in this mode`]
+        : lower.includes(anchor.toLowerCase()) ? [] : [anchor.toLowerCase()]),
       ...needles.filter(needle => !lower.includes(needle)),
       ...(order.negations ?? []).filter(word => lower.includes(word.toLowerCase())).map(word => `negation present: ${word}`),
     ];
