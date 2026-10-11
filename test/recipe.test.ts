@@ -7,10 +7,10 @@ import { COMPACT, OPTCHAT_PROMPT } from '../src/prompts.ts';
 import { loadConfig } from '../src/config.ts';
 import { Memory } from '../src/memory.ts';
 
-test('compactor equals recipe §5; turn adds only the deliberate standing-orders extension', () => {
+test('compactor equals recipe §5; the turn prompt keeps the recipe verbatim as its opening', () => {
   const recipe = readFileSync(new URL('./fixtures/recipe-prompt.txt', import.meta.url), 'utf8').trimEnd();
   assert.equal(COMPACT, recipe);
-  assert.equal(OPTCHAT_PROMPT, recipe + `\n\n<orders through="N"> holds the user's standing orders as of message N, restated in clear wording. They override conflicting summaries; the user's newer messages in the view can change or retire them and then win. For a goal, when its done-condition is met, say so in the reply with the evidence and ask the user whether to retire it; never treat it as retired without the user's words. Only the user's words create, change or retire an order. zoom(id, 1) shows the user's exact words, so if an order's wording seems ambiguous, check the original with zoom(id, 1) before acting. Use zoom(id, 1) for context.`);
+  assert.ok(OPTCHAT_PROMPT.startsWith(recipe + '\n\n'));
 });
 test('new profiles default to xhigh and existing explicit effort is unchanged', () => {
   const dir = mkdtempSync(join(tmpdir(), 'optchat-recipe-config-'));

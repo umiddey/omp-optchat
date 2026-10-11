@@ -168,6 +168,11 @@ never a fabricated condition. The static turn paragraph says orders are current 
 newer user words in the view can change/retire them and take precedence. On apparent goal
 completion the agent must reply with evidence and ask the user whether to retire it, never
 remove it on its own. Header, kinds and conditions remain byte-stable between batches.
+OMP still sends context files (AGENTS.md) in the system prompt; OptChat neither adds nor removes them. The same
+paragraph sets their precedence against orders: repetition is normal; on a true conflict the newer date wins (the
+order's rendered date vs the date written beside the context-file rule); undated or unsettled, the model asks the
+user. Deduplicating the ledger against context files is deliberately not done: it would silently drop an order the
+user later deletes from the file.
 
 Only a chat view merge batch publishes subsequent ledger changes. Its inclusive message point
 selects open extraction records through `P`; the turn waits for background migration, extraction and consolidation

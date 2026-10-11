@@ -90,6 +90,9 @@ the summary tree, restated in clear wording. They appear as an `<orders through=
 request. New orders remain in recent view lines until the next view merge batch, when the ledger
 is consolidated: orders are restated, duplicates and multi-message orders merge, and newest contradictory instructions replace earlier ones. A code guard checks that no condition, number, path or id is lost.
 The static prompt gives orders priority over conflicting summaries, but newer user messages can change or retire them and win. `zoom(id, 1)` gives context.
+Context files such as `AGENTS.md` stay your curated rulebook and are sent as OMP always sends them; a rule appearing
+there and in the ledger is normal. When the two truly conflict, the newer date wins (an order's date is in its line;
+a context-file rule's date is the one written beside it, e.g. "(owner 2026-10-11)"). Undated or unsettled: the model asks you.
 This is a deliberate extension beyond Taelin's recipe, not a change to existing summary nodes.
 
 No extra config: orders are scanned by the summarizer calls that already run, using `compactor`'s model
