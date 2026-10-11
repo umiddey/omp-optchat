@@ -3,14 +3,13 @@ import assert from 'node:assert/strict';
 import { readFileSync, mkdtempSync, rmSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
-import { COMPACT, OPTCHAT_PROMPT } from '../src/prompts.ts';
+import { COMPACT } from '../src/prompts.ts';
 import { loadConfig } from '../src/config.ts';
 import { Memory } from '../src/memory.ts';
 
 test('compactor equals recipe §5; the turn prompt keeps the recipe verbatim as its opening', () => {
   const recipe = readFileSync(new URL('./fixtures/recipe-prompt.txt', import.meta.url), 'utf8').trimEnd();
   assert.equal(COMPACT, recipe);
-  assert.ok(OPTCHAT_PROMPT.startsWith(recipe + '\n\n'));
 });
 test('new profiles default to xhigh and existing explicit effort is unchanged', () => {
   const dir = mkdtempSync(join(tmpdir(), 'optchat-recipe-config-'));

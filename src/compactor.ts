@@ -4,8 +4,6 @@ import type { ModelRegistry } from '@oh-my-pi/pi-coding-agent';
 import { COMPACT, compaction, tooLong } from './prompts.ts';
 import { bytes, NODE, type Compressor } from './memory.ts';
 import { cachePayload, record, splitView } from './cache.ts';
-import { EXTRACT_ORDERS, MIGRATE_LEDGER, CONSOLIDATE_ORDERS } from './prompts.ts';
-import { orderMap, type OrderDirective, type OrderTask } from './orders.ts';
 import { noInstrumentation, type Instrumentation, type SettledMeta } from './measurement.ts';
 
 export interface ModelChoice { provider: string; model: string; thinking: ThinkingLevel }
@@ -43,11 +41,6 @@ function primeFirst() {
     };
   };
 }
-/** One reply's ORDERS JSON. Invalid JSON, or orders for ids the call did not scan, leave the messages unscanned for the next covering call. */
-function parseOrders(text: string, ids: readonly number[]) {
-  try { return orderMap(JSON.parse(text.trim().replace(/^```(?:json)?\s*/, '').replace(/\s*```$/, '')), ids); }
-  catch { return undefined; }
-}
 /** How a settled provider call is accounted: pi-ai resolves error and aborted streams into replies rather than throws,
  * so the status comes from the reply when there is one; `usage` is what the provider actually reported — or unknown. */
 function outcome(reply: AssistantMessage): SettledMeta {
@@ -81,11 +74,11 @@ export function createCompressor(registry: ModelRegistry, choice: () => ModelCho
     const messages: Message[] = [{ role: 'user', content: [{ type: 'text', text: input.context }, { type: 'text', text: step }], timestamp: Date.now() }];
     const view = splitView(input.context);
     const prefix = model.api === 'anthropic-messages' && view.length > 1 ? `${model.provider}/${model.id}/${thinking ?? 'off'}\n${view.slice(0, -1).join('')}` : undefined;
-    const tries: { line: string; orders?: Map<number, OrderDirective[]> }[] = [];
+    const tries: { line: string }[] = [];
     for (let attempt = 0; attempt < 5; attempt++) {
       const warmed = prefix ? await gate(prefix, signal) : () => {};
       const span = (instrument ?? noInstrumentation)({ purpose: 'summary', provider: model.provider, model: model.id,
-        attempt: attempt + 1, part: input.part, ...(input.scan ? { scan: input.scan } : {}) });
+        attempt: attempt + 1, part: input.part });
       let reply: AssistantMessage;
       try {
         const stream = streamSimple(model, { systemPrompt: [COMPACT], messages }, {
@@ -108,46 +101,17 @@ export function createCompressor(registry: ModelRegistry, choice: () => ModelCho
       if (reply.stopReason === 'error' || reply.stopReason === 'aborted') throw new Error(reply.errorMessage ?? `Compactor ${reply.stopReason}`);
       // The compactions' view shows each line under its id+n| head, which a line can copy.
       const raw = reply.content.filter(c => c.type === 'text').map(c => c.text).join('').trim();
-      // With a scan, the orders follow the line after an `ORDERS:` line; they are not part of the line's 512 bytes.
-      const at = raw.search(/^ORDERS:/m);
-      const line = (at < 0 ? raw : raw.slice(0, at)).trim().replace(/^\d+\+\d+\|\s*/, '');
+      // The compaction task asks for one summary line; the model returns just that line.
+      const line = raw.trim().replace(/^\d+\+\d+\|\s*/, '');
       if (!line) throw new Error('Compactor returned no text.');
-      tries.push({ line, orders: input.scan && at >= 0 ? parseOrders(raw.slice(at + 'ORDERS:'.length), input.scan) : undefined });
+      tries.push({ line });
       if (bytes(line) <= accepted()) break;
       messages.push(reply);
       const cut = Buffer.from(line).subarray(0, NODE).toString('utf8').replace(/\uFFFD$/, '');
       messages.push({ role: 'user', content: tooLong(bytes(line), cut), timestamp: Date.now() });
     }
     const chosen = tries.reduce((a, b) => bytes(a.line) <= bytes(b.line) ? a : b);
-    if (!input.scan) return chosen.line;
-    // Each try scans the same messages, so when the accepted line's orders are invalid, the first valid ones this call produced stand.
-    return { text: chosen.line, orders: chosen.orders ?? tries.find(t => t.orders)?.orders ?? new Map() };
+    return chosen.line;
   };
 }
 
-/** Orders reuse the profile's compactor model at medium effort, and never enter the summary tree. */
-export function createOrderTask(registry: ModelRegistry, choice: () => ModelChoice,
-  onUsage: (message: AssistantMessage) => void = () => {}, instrument?: Instrumentation): OrderTask {
-  return async (input, signal) => {
-    const selected = choice(), model = registry.find(selected.provider, selected.model);
-    if (!model) throw Error(`Compactor model unavailable: ${selected.provider}/${selected.model}`);
-    const note = input.kind === 'consolidate' && input.retry ? `${input.retry}\n` : '';
-    const messages: Message[] = [{ role: 'user', content: `${note}${JSON.stringify(input.kind === 'consolidate' ? { ...input, retry: undefined } : input)}`, timestamp: Date.now() }];
-    const span = (instrument ?? noInstrumentation)({ purpose: input.kind, provider: model.provider, model: model.id,
-      attempt: 1, ...(input.kind === 'consolidate' && input.retry ? { retry: true } : {}) });
-    let reply: AssistantMessage;
-    try {
-      reply = await streamSimple(model, {
-        systemPrompt: [input.kind === 'backfill' ? EXTRACT_ORDERS : input.kind === 'migrate' ? MIGRATE_LEDGER : CONSOLIDATE_ORDERS], messages,
-      }, { apiKey: await registry.getApiKey(model), sessionId: 'optchat-orders', reasoning: reasoningFor(model, ThinkingLevel.Medium),
-        signal, cacheRetention: 'short',
-        // The composition reads the payload as sent; orders carry no cache transform, so it passes through untouched.
-        onPayload: payload => { span.payload(payload); return payload; } }).result();
-      span.settled(outcome(reply));
-    } catch (error) { span.settled(failure(error, signal)); throw error; }
-    onUsage(reply);
-    if (reply.stopReason === 'error' || reply.stopReason === 'aborted') throw Error(reply.errorMessage ?? `Orders ${reply.stopReason}`);
-    const text = reply.content.filter(c => c.type === 'text').map(c => c.text).join('').trim();
-    return JSON.parse(text.replace(/^```(?:json)?\s*/, '').replace(/\s*```$/, ''));
-  };
-}

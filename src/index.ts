@@ -4,7 +4,7 @@ import type { ExtensionAPI, ExtensionContext } from '@oh-my-pi/pi-coding-agent';
 import { lookup } from '@oh-my-pi/pi-coding-agent/config/registry';
 import type { AgentMessage } from '@oh-my-pi/pi-agent-core';
 import { Memory } from './memory.ts';
-import { createCompressor, createOrderTask } from './compactor.ts';
+import { createCompressor } from './compactor.ts';
 import { defaults, profilePath, loadConfig, firstRun, WELCOME } from './config.ts';
 import { lockProfile } from './profiles.ts';
 import { asUser, boundedMessage, logMessage } from './transcript.ts';
@@ -31,7 +31,7 @@ export default function optchat(pi: ExtensionAPI) {
   let run: AgentMessage[] = [], logged = 0, running = false;
   /** The run's first message as OMP holds it (asUser turns shown custom messages into user ones for the log). */
   let runFirst: AgentMessage | undefined;
-  let view: string | undefined, orders = '', memories = '', lastStart: AgentMessage | undefined;
+  let view: string | undefined, memories = '', lastStart: AgentMessage | undefined;
   let runLimit = defaults.runLimit, recall = defaults.memories, cut: AgentMessage | undefined;
   const seen = new Set<string>();
   /** The previous run's last message: everything after it opens the next run, even before that run's first message_end ran. */
@@ -105,7 +105,7 @@ export default function optchat(pi: ExtensionAPI) {
       // The span source is the sink itself, not the `measurement` slot: a straggling background call at shutdown
       // must settle into the (closed, appendable-again) files instead of dereferencing a cleared variable.
       const instrument: Instrumentation = meta => telemetry.invoke(meta);
-      memory = await Memory.open(dir, createCompressor(ctx.modelRegistry, () => config.compactor, undefined, undefined, instrument), text => ctx.ui.notify(text, 'warning'), undefined, undefined, createOrderTask(ctx.modelRegistry, () => config.compactor, undefined, instrument));
+      memory = await Memory.open(dir, createCompressor(ctx.modelRegistry, () => config.compactor, undefined, undefined, instrument), text => ctx.ui.notify(text, 'warning'), undefined, undefined);
       agents = new AgentIndex(dir, text => ctx.ui.notify(text, 'warning'), () => ctx.sessionManager.getSessionFile());
       const setting = lookup('compaction.enabled');
       if (!setting) throw new Error('OMP compaction.enabled setting unavailable.');
@@ -149,7 +149,7 @@ export default function optchat(pi: ExtensionAPI) {
       const m = required();
       if (running && view === undefined) {
         await waitSummaries(m, ctx);
-        view = m.render(); orders = m.orders?.render() ?? ''; flush();
+        view = m.render(); flush();
       }
       // OMP emits message_end fire-and-forget, so the first request of a run can arrive before runFirst is set.
       if (running && !runFirst && lastEnd) {
@@ -171,7 +171,7 @@ export default function optchat(pi: ExtensionAPI) {
             for (const message of event.messages.slice(at, next)) await recordMessage(message, ctx);
             flush();
             await waitSummaries(m, ctx);
-            view = m.render(); orders = m.orders?.render() ?? ''; cut = event.messages[next]; from = next;
+            view = m.render(); cut = event.messages[next]; from = next;
             // Messages typed into a running turn join this run; after the fold the newest of them is the current message,
             // not the run opener (else the model answers a stale prompt while the new one sits only in the view).
             const newest = event.messages.findLastIndex((message, index) => index > at && index < next && message.role === 'user');
@@ -179,7 +179,7 @@ export default function optchat(pi: ExtensionAPI) {
           }
         }
       }
-      return { messages: projectContext(event.messages, at, running ? view! : m.render(), memories, true, 'main', from, running ? orders : m.orders?.render() ?? '') };
+      return { messages: projectContext(event.messages, at, running ? view! : m.render(), memories, true, 'main', from, '') };
     } catch (error) {
       if (signal.aborted && !fault) return { messages: [{ role: 'developer' as const, content: 'OptChat: superseded by a newer message. Stop.', timestamp: 0 }] };
       fail(error, ctx);

@@ -13,7 +13,7 @@ let streaming: typeof ai.streamSimple;
 mock.module('@oh-my-pi/pi-ai', () => ({ ...ai, streamSimple: (...args: Parameters<typeof ai.streamSimple>) => streaming(...args) }));
 // Module-loading boundary (deliberate dynamic import): a static import would bind the real streamSimple into
 // src/compactor.ts before mock.module installs the fake, so the consumer must be imported after the mock.
-const { createCompressor, createOrderTask } = await import('../src/compactor.ts');
+const { createCompressor } = await import('../src/compactor.ts');
 const model = buildModel({ id: 'fixture', name: 'Fixture', api: 'anthropic-messages', provider: 'fixture', baseUrl: 'https://invalid.local', reasoning: false, input: ['text'], cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0 }, contextWindow: 200000, maxTokens: 1000 });
 const registry = { find: () => model, getApiKey: async () => 'synthetic' } as unknown as ModelRegistry;
 const usage = { input: 3, output: 5, cacheRead: 7, cacheWrite: 11, totalTokens: 26, cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0, total: 0 } };
@@ -22,7 +22,7 @@ const utf8 = (value: unknown) => Buffer.byteLength(JSON.stringify(value), 'utf8'
 const scratchDirs: string[] = [];
 const scratch = () => { const dir = mkdtempSync(join(tmpdir(), 'optchat-measure-')); scratchDirs.push(dir); return dir; };
 afterAll(() => { for (const dir of scratchDirs) rmSync(dir, { recursive: true, force: true }); });
-const input = { context: '<chat>\n</chat>', source: 'user: hi', part: { l: 2, i: 7 }, scan: [28, 29] };
+const input = { context: '<chat>\n</chat>', source: 'user: hi', part: { l: 2, i: 7 } };
 const done = (message: ai.AssistantMessage) => { const stream = ai.createAssistantMessageEventStream(); queueMicrotask(() => { stream.push({ type: 'done', reason: 'stop', message }); stream.end(); }); return stream; };
 
 test('every provider invocation starts before it settles; retries get distinct ids and attempts; onUsage is unchanged', async () => {
@@ -32,8 +32,8 @@ test('every provider invocation starts before it settles; retries get distinct i
   const seen: ai.AssistantMessage[] = [];
   const compress = createCompressor(registry, () => ({ provider: 'fixture', model: 'fixture', thinking: 'off' }),
     message => seen.push(message), () => NODE, meta => measure.invoke(meta));
-  // The scan makes this a summary-with-orders call: the fitting attempt wins with whatever orders it scanned (none here).
-  assert.deepEqual(await compress(input, new AbortController().signal), { text: 'x'.repeat(400), orders: new Map() });
+  // The fitting attempt wins with the shortest reply.
+  assert.deepEqual(await compress(input, new AbortController().signal), 'x'.repeat(400));
   measure.close();
   const { rows } = readUsageLog(files.usage);
   const starts = rows.filter(row => row.type === 'background-start'), settled = rows.filter(row => row.type === 'background');
@@ -49,7 +49,6 @@ test('every provider invocation starts before it settles; retries get distinct i
     assert.equal(row.provider, 'fixture');
     assert.equal(row.model, 'fixture');
     assert.deepEqual(row.part, { l: 2, i: 7 });
-    assert.deepEqual(row.scan, [28, 29]);
     assert.equal(row.status, 'ok');
     assert.deepEqual(row.usage, usage);
     assert.equal(typeof row.durationMs, 'number');
@@ -171,30 +170,6 @@ test('an abort while only waiting for a primer writes no rows at all', async () 
   assert.equal(rows.filter(row => row.type === 'background').length, 1);
 });
 
-test('orders calls record their purpose and retry flag, and their composition links to the same id', async () => {
-  const dir = scratch(), files = measureFiles(dir), measure = openMeasurement(dir);
-  streaming = (_model, _context, options) => {
-    const wire = { model: 'fixture', system: [{ type: 'text', text: 'orders prompt' }], messages: [{ role: 'user', content: [{ type: 'text', text: '[]' }] }] };
-    options?.onPayload?.(wire);
-    return done(reply('[]'));
-  };
-  const task = createOrderTask(registry, () => ({ provider: 'fixture', model: 'fixture', thinking: 'off' }), () => {}, meta => measure.invoke(meta));
-  await task({ kind: 'consolidate', ledger: { through: -1, items: [] }, records: [], through: 0, retry: 'Restate them again.' }, new AbortController().signal);
-  await task({ kind: 'backfill', items: [] }, new AbortController().signal);
-  measure.close();
-  const { rows } = readUsageLog(files.usage);
-  const settled = rows.filter(row => row.type === 'background');
-  assert.deepEqual(settled.map(row => row.purpose), ['consolidate', 'backfill']);
-  assert.equal(settled[0].retry, true);
-  assert.equal(settled[1].retry, undefined);
-  assert.deepEqual(settled.map(row => row.attempt), [1, 1]);
-  const compositions = readCompositionLog(files.composition).rows;
-  assert.deepEqual(compositions.map(row => row.purpose), ['consolidate', 'backfill']);
-  assert.deepEqual(compositions.map(row => row.id), settled.map(row => row.id));
-  assert.equal(compositions[0].blocks.view.bytes, 0);
-  assert.ok(compositions[0].blocks.system.bytes > 0);
-  assert.ok(compositions[0].blocks.history.bytes > 0);
-});
 
 test('background composition reads the payload as sent, after the cache split, without changing it', async () => {
   const dir = scratch(), files = measureFiles(dir), measure = openMeasurement(dir);
@@ -206,7 +181,7 @@ test('background composition reads the payload as sent, after the cache split, w
     return done(reply('0+1|kept'));
   };
   const compress = createCompressor(registry, () => ({ provider: 'fixture', model: 'fixture', thinking: 'off' }), () => {}, () => NODE, meta => measure.invoke(meta));
-  assert.equal(await compress({ ...input, context, scan: undefined }, new AbortController().signal), 'kept');
+  assert.equal(await compress({ ...input, context }, new AbortController().signal), 'kept');
   measure.close();
   const compositions = readCompositionLog(files.composition).rows;
   assert.equal(compositions.length, 1);
@@ -326,7 +301,7 @@ test('telemetry failures warn boundedly, never throw, and eventually go inert; t
   const broken = openMeasurement(dir, () => {});
   streaming = () => done(reply('12+4|user: kept'));
   const compress = createCompressor(registry, () => ({ provider: 'fixture', model: 'fixture', thinking: 'off' }), () => {}, () => NODE, meta => broken.invoke(meta));
-  assert.equal(await compress({ ...input, scan: undefined }, new AbortController().signal), 'user: kept');
+  assert.equal(await compress({ ...input }, new AbortController().signal), 'user: kept');
   broken.close();
 });
 

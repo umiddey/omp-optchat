@@ -1,7 +1,6 @@
 import { EventEmitter } from 'node:events';
 import { FileStore, storeFor, type Saved, type Store } from './store.ts';
 import { pageText } from './paging.ts';
-import { Orders, type OrderDirective, type OrderTask } from './orders.ts';
 
 export const NODE = 512;
 export const VIEW = 128_000;
@@ -12,11 +11,11 @@ export type Kind = typeof KINDS[number];
 export interface Entry { i: number; kind: Kind; text: string; size: number; date: string; receipt?: string }
 export interface Part { l: number; i: number }
 export interface Summary extends Part { text: string; size: number }
-/** `part` is the node to build: a message's leaf, or the merge of its two halves. `scan`: the unscanned user message ids in its span, when the call also returns their orders. */
-export interface Compression { context: string; source: string; part: Part; scan?: number[] }
-/** A plain summary, or the summary with the orders read for its `scan` ids. */
-export type CompressorResult = string | { text: string; orders?: ReadonlyMap<number, readonly OrderDirective[]> };
-export type Compressor = (input: Compression, signal: AbortSignal) => Promise<CompressorResult>;
+/** `part` is the node to build: a message's leaf, or the merge of its two halves. */
+export interface Compression { context: string; source: string; part: Part; }
+/** A summary returned by the compressor. */
+export type CompressorResult = string;
+export type Compressor = (input: Compression, signal: AbortSignal) => Promise<string>;
 const key = ({ l, i }: Part) => l * 2 ** 40 + i;
 const UNBUILT = '(not summarized yet: zoom it)';
 export const start = ({ l, i }: Part) => i * 2 ** l;
@@ -123,25 +122,22 @@ export class Memory {
   readonly directory: string;
   readonly store: Store;
   lastError?: string;
-  orders?: Orders;
 
   /** Opens the memory in `directory` through the store `storeFor` picks, after its load. */
-  static async open(directory: string, compress: Compressor, warn: (s: string) => void = console.error, budget = VIEW, jobs = 8, orderTask?: OrderTask) {
+  static async open(directory: string, compress: Compressor, warn: (s: string) => void = console.error, budget = VIEW, jobs = 8) {
     const store = storeFor(directory, warn);
-    // Orders is attached before construction so merges while replaying the saved view checkpoint `pending` and wait for their records.
-    const orders = orderTask ? new Orders(directory, orderTask, warn) : undefined;
-    return new Memory({ directory, store, saved: await store.load(), orders }, compress, warn, budget, jobs);
+    return new Memory({ directory, store, saved: await store.load() }, compress, warn, budget, jobs);
   }
   /** A directory alone opens a FileStore there. `jobs`: summaries built at once, and how many unbuilt lines a new message's node
    * waits behind. The main chat keeps at most eight workers. */
-  constructor(source: string | { directory: string; store: Store; saved: Saved; orders?: Orders }, private readonly compress: Compressor,
+  constructor(source: string | { directory: string; store: Store; saved: Saved }, private readonly compress: Compressor,
     private readonly warn: (s: string) => void = console.error,
     readonly budget = VIEW, private readonly jobs = 8, private readonly retryMs = 10_000) {
     this.chat = new Sawtooth(budget, budget / 2, part => this.node(part));
     this.compaction = new Sawtooth(budget / 4, budget / 8, part => this.node(part));
     let saved: Saved;
     if (typeof source === 'string') { const store = new FileStore(source, warn); this.directory = source; this.store = store; saved = store.load(); }
-    else ({ directory: this.directory, store: this.store, saved, orders: this.orders } = source);
+    else ({ directory: this.directory, store: this.store, saved } = source);
     const log = saved.entries;
     const entries = log.every(isEntry) ? log.sort((a, b) => a.i - b.i) : undefined;
     if (!entries || entries.some((entry, i) => entry.i !== i)) throw new Error('Invalid/noncontiguous OptChat log; refusing to change it.');
@@ -153,9 +149,6 @@ export class Memory {
     }
     for (const node of this.tree.values()) this.queueParent(node);
     for (let i = 0; i < this.root.length; i++) if (!this.node({ l: 0, i })) this.unbuilt.add(i);
-    // Before any view merge can run: backfill queues the unscanned messages, replays a saved `pending` batch as blocking work, and
-    // lets every merge below checkpoint the ledger before the view is saved.
-    this.orders?.backfill(this.root, i => this.covers(i));
     // Refolding the log gives a different view than the live one, and every cache entry would miss, so the view is saved.
     const loaded = this.load(saved.view);
     for (const part of this.view) this.compaction.push(part);
@@ -185,7 +178,6 @@ export class Memory {
       this.warn(`Memory could not be saved: ${this.failed}`);
     });
     this.root.push(entry); this.push(entry.i); if (this.fit()) this.save(); this.schedule();
-    this.orders?.append(entry);
     return entry;
   }
   node(part: Part) { return this.tree.get(key(part)); }
@@ -252,7 +244,6 @@ export class Memory {
   private fit(total = this.root.length) {
     const merged = this.chat.fit(total);
     this.compaction.fit(total, merged);
-    if (merged) void this.orders?.batch(total - 1);
     const owed = this.owed();
     this.peak = owed > 0 ? Math.max(this.peak, owed) : 0;
     this.events.emit('change');
@@ -314,23 +305,14 @@ export class Memory {
   private async build(part: Part) {
     const source = this.sourceOf(part);
     const mergeSource = part.l > 0 ? [0, 1].map(offset => flat(this.text({ l: part.l - 1, i: 2 * part.i + offset }))).join('\n') : source;
-    // A literal node summarizes nothing, so it scans nothing; a compressed node scans the unscanned user messages in its span.
+    // A literal node summarizes nothing, so it is returned as-is; a compressed node returns the compressor's line.
     let text = source;
-    let orders: ReadonlyMap<number, readonly OrderDirective[]> | undefined;
-    let context = '';
     if (bytes(source) > NODE) {
-      const scan = this.orders?.scan(start(part), end(part) - 1) ?? [];
-      context = this.compactionView(part);
-      const reply = await this.compress({ context, source: mergeSource, part, ...(scan.length ? { scan } : {}) }, this.controller.signal);
-      const result = typeof reply === 'string' ? { text: reply } : reply;
-      text = result.text.trim();
-      orders = result.orders;
+      const reply = await this.compress({ context: this.compactionView(part), source: mergeSource, part }, this.controller.signal);
+      text = reply.trim();
     }
     if (this.stopped) return;
     if (!text) throw new Error('Compactor returned an empty summary.');
-    // Orders are recorded before the node that scanned them is written, so a restart keeps them.
-    if (orders) this.orders?.recordAll(orders, context);
-    const node = { ...part, text, size: lineBytes(text) };
     // A failed node write fails the build, which is retried.
     const written = this.enqueue(() => this.store.appendNode(node), error => { throw error; });
     if (written) await written;
@@ -355,7 +337,7 @@ export class Memory {
   async settle(signal?: AbortSignal, until: 'turn' | 'tree' = 'turn'): Promise<void> {
     const done = () => until === 'tree' ? this.ready && this.busy.size === 0 && this.tree.size === this.expectedNodes()
       : this.ready || this.stalled;
-    if (done()) { await this.orders?.settle(signal, true); return; }
+    if (done()) return;
     if (this.stopped || signal?.aborted) throw new Error('Memory wait cancelled.');
     await new Promise<void>((resolve, reject) => {
       const cleanup = () => { this.events.off('change', check); signal?.removeEventListener('abort', abort); };
@@ -363,7 +345,6 @@ export class Memory {
       const check = () => { if (this.stopped) abort(); else if (done()) { cleanup(); resolve(); } };
       this.events.on('change', check); signal?.addEventListener('abort', abort, { once: true }); check();
     });
-    await this.orders?.settle(signal, true);
   }
   private expectedNodes() {
     let count = 0;
@@ -394,6 +375,5 @@ export class Memory {
   async close() {
     this.stopped = true; this.controller.abort(); clearTimeout(this.retryTimer);
     this.events.emit('change'); await Promise.allSettled(this.busy.values()); await this.writing;
-    await this.orders?.close();
   }
 }

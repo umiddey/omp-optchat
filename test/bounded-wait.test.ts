@@ -8,7 +8,6 @@ import type { AgentMessage } from '@oh-my-pi/pi-agent-core';
 import type { ExtensionAPI, ExtensionContext } from '@oh-my-pi/pi-coding-agent';
 import optchat from '../src/index.ts';
 import { Memory, type Entry } from '../src/memory.ts';
-import { Orders, type ExtractedOrders, type OrderDirective, type OrderTask } from '../src/orders.ts';
 
 type Hook = (event: { message?: AgentMessage; messages?: AgentMessage[] }, ctx: ExtensionContext) => unknown;
 
@@ -20,17 +19,6 @@ Memory.prototype.settle = function (signal?: AbortSignal, until?: 'turn' | 'tree
   return REAL_SETTLE.call(this, signal, until);
 };
 afterAll(() => { Memory.prototype.settle = REAL_SETTLE; });
-
-const entry = (i: number, text = 'Never push'): Entry => ({ i, text, kind: 'user', date: '2026-10-10', size: text.length });
-
-/** Waits for `gate`, unless the consolidation's controller aborts first (a close must never deadlock a failing test). */
-async function awaitGate(signal: AbortSignal, gate: Promise<void>) {
-  signal.throwIfAborted();
-  const stop = Promise.withResolvers<never>();
-  signal.addEventListener('abort', () => stop.reject(Error('stopped')), { once: true });
-  await Promise.race([gate, stop.promise]);
-}
-
 // Real-clock guards on purpose: the code under test is a setTimeout race against a settle that never resolves, and fake
 // timers cannot drive the production timer alongside the extension's real async memory and store I/O. The 3 s guard only
 // bounds the wait so an unbounded-settle regression fails at the guard, not at the runner's timeout.
@@ -157,87 +145,3 @@ test('the bounded turn renders the chat opening with the unbuilt placeholder', a
   }
 });
 
-/** The batch's records as the ledger would hold them: each record's standing orders with their own id and date. */
-function echoOrders(records: ExtractedOrders[]) {
-  return records.flatMap(r => r.orders.flatMap(o => 'retire' in o ? [] : [{ ...o, from: [r.i], date: r.date }]));
-}
-
-test('during an in-flight consolidation the pending records stay rendered; the landed ledger replaces them', async () => {
-  const gate = Promise.withResolvers<void>();
-  let calls = 0;
-  const task: OrderTask = async (input, signal) => {
-    if (input.kind !== 'consolidate') return [];
-    if (++calls === 1) return echoOrders(input.records);
-    await awaitGate(signal, gate.promise);
-    return [{ text: 'Never push; always verify', kind: 'rule', from: [1], date: '2026-10-10' }];
-  };
-  const dir = mkdtempSync(join(tmpdir(), 'orders-inflight-'));
-  const o = new Orders(dir, task, () => {}, 10);
-  try {
-    o.append(entry(0)); o.recordAll(new Map([[0, [{ text: 'Never push', kind: 'rule' }]]]));
-    await o.batch(0);
-    o.append(entry(1, 'Always verify')); o.recordAll(new Map([[1, [{ text: 'Always verify', kind: 'rule' }]]]));
-    void o.batch(1);
-    const inflight = o.render();
-    assert.ok(inflight.includes('0 [rule] (2026-10-10): Never push'), 'the landed ledger still shows');
-    assert.ok(inflight.includes('1 [rule] (2026-10-10): Always verify'), 'the pending records stay rendered while the batch is in flight');
-    gate.resolve();
-    await o.settle();
-    const landed = o.render();
-    assert.ok(landed.includes('1 [rule] (2026-10-10): Never push; always verify'), 'the landed ledger shows');
-    assert.ok(!landed.includes(': Always verify'), 'the landed ledger replaces the pending raw records');
-    assert.equal(calls, 2, 'one consolidation call per batch');
-  } finally {
-    gate.resolve();
-    await o.close();
-    rmSync(dir, { recursive: true, force: true });
-  }
-});
-
-test('a restart with a checkpointed batch that has not landed renders the pending records until it replays', async () => {
-  const gate = Promise.withResolvers<void>();
-  const dir = mkdtempSync(join(tmpdir(), 'orders-pending-'));
-  let second: Orders | undefined;
-  try {
-    let firstCalls = 0;
-    const firstTask: OrderTask = async (input, signal) => {
-      if (input.kind !== 'consolidate') return [];
-      if (++firstCalls === 1) return echoOrders(input.records);
-      // Never lands: the close below aborts the controller, which must leave the checkpointed batch unpublished.
-      return awaitGate(signal, Promise.withResolvers<never>().promise).then(() => []);
-    };
-    const first = new Orders(dir, firstTask, () => {}, 10);
-    first.append(entry(0)); first.recordAll(new Map([[0, [{ text: 'Never push', kind: 'rule' }]]]));
-    await first.batch(0);
-    first.append(entry(1, 'Always verify')); first.recordAll(new Map([[1, [{ text: 'Always verify', kind: 'rule' }]]]));
-    void first.batch(1); // checkpoints `pending: 1`; the consolidation hangs and close aborts it before it lands
-    await first.close();
-    const saved = JSON.parse(readFileSync(join(dir, 'ledger.json'), 'utf8'));
-    assert.equal(saved.through, 0);
-    assert.equal(saved.pending, 1, 'the batch point is checkpointed');
-
-    let replayCalls = 0;
-    const replayTask: OrderTask = async (input, signal) => {
-      if (input.kind !== 'consolidate') return [];
-      replayCalls++;
-      await awaitGate(signal, gate.promise);
-      return [{ text: 'Never push; always verify', kind: 'rule', from: [1], date: '2026-10-10' }];
-    };
-    second = new Orders(dir, replayTask, () => {}, 10);
-    second.backfill([entry(0), entry(1, 'Always verify')], () => false);
-    const inflight = second.render();
-    assert.ok(inflight.includes('0 [rule] (2026-10-10): Never push'), 'the published ledger still shows');
-    assert.ok(inflight.includes('1 [rule] (2026-10-10): Always verify'), 'a restart with a pending checkpoint renders the unconsolidated records');
-    gate.resolve();
-    await second.settle();
-    assert.equal(replayCalls, 1, 'the restart replayed the checkpointed batch once');
-    const landed = second.render();
-    assert.ok(landed.includes('1 [rule] (2026-10-10): Never push; always verify'), 'the replayed batch landed');
-    assert.ok(!landed.includes(': Always verify'), 'the landed ledger replaces the pending raw records');
-    assert.equal(JSON.parse(readFileSync(join(dir, 'ledger.json'), 'utf8')).through, 1);
-  } finally {
-    gate.resolve();
-    await second?.close();
-    rmSync(dir, { recursive: true, force: true });
-  }
-});

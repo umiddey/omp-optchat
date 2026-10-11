@@ -1,5 +1,5 @@
 import type { AgentMessage } from '@oh-my-pi/pi-agent-core';
-import { OPTCHAT_PROMPT } from './prompts.ts';
+import { COMPACT } from './prompts.ts';
 import { cachePayload, type CacheState } from './cache.ts';
 export const NOTICES = new Set(['tool-roster-notice', 'eval-prelude-notice', 'session-agent-notice', 'xdev-mount-notice']);
 export const enabled = (active: boolean, kind: string) => active && kind === 'main';
@@ -22,7 +22,7 @@ export function preparePrompt(systemPrompt: string[], active = true, kind = 'mai
   const memories = systemPrompt.filter(s => s.startsWith('<memories>')).join('\n\n');
   const stable = systemPrompt.filter(s => !s.startsWith('<memories>')).map(orderMcpInstructions);
   const at = stable.findIndex(s => s.startsWith('<project-context>'));
-  stable.splice(at < 0 ? stable.length : at, 0, OPTCHAT_PROMPT);
+  stable.splice(at < 0 ? stable.length : at, 0, COMPACT);
   return { systemPrompt: stable, memories };
 }
 export function turnStart(messages: AgentMessage[], first?: AgentMessage) {
@@ -33,12 +33,12 @@ export function turnStart(messages: AgentMessage[], first?: AgentMessage) {
 }
 /** The view (and moved recall) always opens the current turn, so its bytes sit right after the stable notices on
  * every request of the run. A run started by a shown custom message (async result, report) gets its own view message. */
-export function projectContext(messages: AgentMessage[], at: number, view: string, memories: string, active = true, kind = 'main', cut = at + 1, orders = '') {
+export function projectContext(messages: AgentMessage[], at: number, view: string, memories: string, active = true, kind = 'main', cut = at + 1) {
   if (!enabled(active, kind)) return messages;
   const notices = messages.slice(0, at).filter(m => m.role === 'custom' && NOTICES.has(m.customType));
   const first = messages[at], rest = messages.slice(Math.max(at + 1, cut));
   if (!first) throw new Error('OptChat has no current message.');
-  const head = [...(orders ? [{ type: 'text' as const, text: orders }] : []), { type: 'text' as const, text: view }, ...(memories ? [{ type: 'text' as const, text: memories }] : [])];
+  const head = [{ type: 'text' as const, text: view }, ...(memories ? [{ type: 'text' as const, text: memories }] : [])];
   if (first.role === 'user')
     return [...notices, { ...first, content: [...head, ...(typeof first.content === 'string' ? [{ type: 'text' as const, text: first.content }] : first.content)] }, ...rest];
   if (cut > at + 1 && first.role === 'custom') {
