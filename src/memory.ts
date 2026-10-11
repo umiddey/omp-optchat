@@ -13,8 +13,6 @@ export interface Part { l: number; i: number }
 export interface Summary extends Part { text: string; size: number }
 /** `part` is the node to build: a message's leaf, or the merge of its two halves. */
 export interface Compression { context: string; source: string; part: Part; }
-/** A summary returned by the compressor. */
-export type CompressorResult = string;
 export type Compressor = (input: Compression, signal: AbortSignal) => Promise<string>;
 const key = ({ l, i }: Part) => l * 2 ** 40 + i;
 const UNBUILT = '(not summarized yet: zoom it)';
@@ -294,14 +292,6 @@ export class Memory {
     return part.l === 0 ? `${this.root[part.i].kind}: ${this.root[part.i].text}`
       : [0, 1].map(offset => this.text({ l: part.l - 1, i: 2 * part.i + offset })).join('\n');
   }
-  /** Whether a built compressed node covers message i, through its own leaf or an ancestor; the first unbuilt part ends the walk. */
-  private covers(i: number) {
-    for (let part: Part = { l: 0, i }; part.l < 64; part = { l: part.l + 1, i: Math.floor(part.i / 2) }) {
-      if (!this.node(part)) return false;
-      if (bytes(this.sourceOf(part)) > NODE) return true;
-    }
-    return false;
-  }
   private async build(part: Part) {
     const source = this.sourceOf(part);
     const mergeSource = part.l > 0 ? [0, 1].map(offset => flat(this.text({ l: part.l - 1, i: 2 * part.i + offset }))).join('\n') : source;
@@ -313,6 +303,7 @@ export class Memory {
     }
     if (this.stopped) return;
     if (!text) throw new Error('Compactor returned an empty summary.');
+    const node = { ...part, text, size: lineBytes(text) };
     // A failed node write fails the build, which is retried.
     const written = this.enqueue(() => this.store.appendNode(node), error => { throw error; });
     if (written) await written;

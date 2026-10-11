@@ -179,7 +179,7 @@ export default function optchat(pi: ExtensionAPI) {
           }
         }
       }
-      return { messages: projectContext(event.messages, at, running ? view! : m.render(), memories, true, 'main', from, '') };
+      return { messages: projectContext(event.messages, at, running ? view! : m.render(), memories, true, 'main', from) };
     } catch (error) {
       if (signal.aborted && !fault) return { messages: [{ role: 'developer' as const, content: 'OptChat: superseded by a newer message. Stop.', timestamp: 0 }] };
       fail(error, ctx);

@@ -86,12 +86,12 @@ Plain OMP sessions keep their recall either way; OMP still saves facts from OptC
 ## Cutover from ledger to normal history
 
 This version no longer maintains a standing-orders ledger. OptChat does not extract, backfill, migrate, or
-consolidate orders, and it does not inject orders into the conversation: user instructions live only in normal
+consolidate orders, and it does not inject a separate orders block: user instructions live only in normal
 history and in the summaries that preserve them, so `zoom(id, 1)` still opens the original message that contains
 them. Existing profiles are not migrated: if an old `ledger.json` or `orders.jsonl` is present in the profile
 folder, OptChat ignores it and leaves it untouched — nothing is read, merged, or deleted. Because the turn
-prompt changes and the ledger is removed, the first view rewrite after upgrading triggers one cache
-transition; later turns resume the usual cache pattern.
+prompt changes and the ledger block is removed, the first request after upgrading changes the cached prefix.
+Existing summary/view files and the cache-marking algorithm are preserved.
 
 
 ## What it changes in OMP (only when the flag is set)
@@ -123,7 +123,7 @@ any OMP session (main plus every subagent, misses with their likely cause):
 ### Usage measurements
 
 OptChat records background model calls in the profile's `usage.jsonl`: each summary attempt (including
-length retries), orders backfill, migration and consolidation has a start and a terminal row linked by id.
+length retries) has a start and a terminal row linked by id. Existing logs can still contain historical ledger calls.
 Terminal rows include model, purpose, duration, status and provider-reported input/output/cache tokens.
 The recorded `usage.cost` is pi-ai's catalog-priced USD estimate, not an invoice or subscription-quota measurement.
 Thrown requests and failed responses without reported usage have `usage: null`, not a fabricated zero.
@@ -131,6 +131,7 @@ An unmatched start means accounting is still pending; these logs do not reconstr
 
 `request-composition.jsonl` records each foreground and background request's tools, system prompt, orders,
 view, memories, history and other serialized UTF-8 bytes. Their sum equals the serialized payload size.
+The `orders` category remains readable for historical measurements; this version emits no separate orders block.
 Per-block token estimates use **bytes / 4**, not provider tokenization; provider-reported token counters remain
 in the usage records and OMP session journal. History includes message envelopes; other includes residual JSON structure
 and provider parameters. Measurements do not enter the model prompt or alter the request.

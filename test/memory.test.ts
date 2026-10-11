@@ -574,22 +574,26 @@ test('view size counts the flattened text that render emits, for new and reloade
     assert.equal(memory.size, measured(memory), 'loaded from the tree');
   } finally { await memory.close(); rmSync(dir, { recursive: true, force: true }); }
 });
-test('legacy ledger sentinel files are ignored on restart and left byte-identical; view and zoom still work', async () => {
+test('legacy ledger files remain untouched across summary building and restart; original instructions remain retrievable', async () => {
   const dir = mkdtempSync(join(tmpdir(), 'optchat-restart-legacy-'));
-  const ledger = { through: -1, items: [{ text: 'old order', kind: 'rule' as const, from: [1], date: '2026-10-10' }] };
-  const ordersLine = JSON.stringify({ i: 1, date: '2026-10-10', orders: [{ text: 'old order', kind: 'rule' }] }) + '\n';
-  writeFileSync(join(dir, 'ledger.json'), JSON.stringify(ledger));
-  writeFileSync(join(dir, 'orders.jsonl'), ordersLine);
-  const ledgerBefore = readFileSync(join(dir, 'ledger.json'));
-  const ordersBefore = readFileSync(join(dir, 'orders.jsonl'));
-  const calls: Compression[] = [];
-  const memory = new Memory(dir, async input => { calls.push(input); return input.source.slice(0, 100); }, () => {});
+  const ledger = JSON.stringify({ through: -1, items: [{ text: 'old order', kind: 'rule', from: [1], date: '2026-10-10' }] });
+  const orders = JSON.stringify({ i: 1, date: '2026-10-10', orders: [{ text: 'old order', kind: 'rule' }] }) + '\n';
+  writeFileSync(join(dir, 'ledger.json'), ledger);
+  writeFileSync(join(dir, 'orders.jsonl'), orders);
+  const original = 'Every answer must include ORCHID. ' + 'Background context. '.repeat(40);
+  let memory = await Memory.open(dir, async () => 'user: Every answer must include ORCHID.', () => {});
   try {
-    memory.append('user', 'keep this message');
+    memory.append('user', original);
     await memory.settle(AbortSignal.timeout(25_000), 'tree');
-    assert.equal(readFileSync(join(dir, 'ledger.json')), ledgerBefore, 'ledger.json is byte-identical');
-    assert.equal(readFileSync(join(dir, 'orders.jsonl')), ordersBefore, 'orders.jsonl is byte-identical');
-    assert.ok(memory.view.length > 0, 'the view is preserved and built');
-    assert.match(memory.zoom(0, 1), /keep this message/);
+    const view = memory.render();
+    assert.match(view, /Every answer must include ORCHID/);
+    assert.ok(!view.includes('old order'));
+    await memory.close();
+    memory = await Memory.open(dir, async () => { throw Error('saved summary must not be recomputed'); }, () => {});
+    await memory.settle(AbortSignal.timeout(25_000), 'tree');
+    assert.equal(memory.render(), view);
+    assert.equal(memory.zoom(0, 1), `0+0|user: ${original}`);
+    assert.equal(readFileSync(join(dir, 'ledger.json'), 'utf8'), ledger);
+    assert.equal(readFileSync(join(dir, 'orders.jsonl'), 'utf8'), orders);
   } finally { await memory.close(); rmSync(dir, { recursive: true, force: true }); }
 });

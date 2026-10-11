@@ -29,7 +29,7 @@ test('recipe ruler, merge ranges and Too long retry; shortest of at most five re
     queueMicrotask(() => { stream.push({ type: 'done', reason: 'stop', message }); stream.end(); });
     return stream;
   };
-  assert.equal(summaryOf(await compressor()(input, new AbortController().signal)).length, 600);
+  assert.equal((await compressor()(input, new AbortController().signal)).length, 600);
   assert.equal(calls, 5);
   assert.match(String(contexts[1].messages.at(-1)?.content), /Too long: your line is 700 bytes/);
   assert.ok(String(contexts[1].messages.at(-1)?.content).endsWith('x'.repeat(512) + '| ← LIMIT'));

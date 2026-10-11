@@ -74,7 +74,7 @@ export function createCompressor(registry: ModelRegistry, choice: () => ModelCho
     const messages: Message[] = [{ role: 'user', content: [{ type: 'text', text: input.context }, { type: 'text', text: step }], timestamp: Date.now() }];
     const view = splitView(input.context);
     const prefix = model.api === 'anthropic-messages' && view.length > 1 ? `${model.provider}/${model.id}/${thinking ?? 'off'}\n${view.slice(0, -1).join('')}` : undefined;
-    const tries: { line: string }[] = [];
+    const tries: string[] = [];
     for (let attempt = 0; attempt < 5; attempt++) {
       const warmed = prefix ? await gate(prefix, signal) : () => {};
       const span = (instrument ?? noInstrumentation)({ purpose: 'summary', provider: model.provider, model: model.id,
@@ -100,18 +100,15 @@ export function createCompressor(registry: ModelRegistry, choice: () => ModelCho
       onUsage(reply);
       if (reply.stopReason === 'error' || reply.stopReason === 'aborted') throw new Error(reply.errorMessage ?? `Compactor ${reply.stopReason}`);
       // The compactions' view shows each line under its id+n| head, which a line can copy.
-      const raw = reply.content.filter(c => c.type === 'text').map(c => c.text).join('').trim();
-      // The compaction task asks for one summary line; the model returns just that line.
-      const line = raw.trim().replace(/^\d+\+\d+\|\s*/, '');
+      const line = reply.content.filter(c => c.type === 'text').map(c => c.text).join('').trim().replace(/^\d+\+\d+\|\s*/, '');
       if (!line) throw new Error('Compactor returned no text.');
-      tries.push({ line });
+      tries.push(line);
       if (bytes(line) <= accepted()) break;
       messages.push(reply);
       const cut = Buffer.from(line).subarray(0, NODE).toString('utf8').replace(/\uFFFD$/, '');
       messages.push({ role: 'user', content: tooLong(bytes(line), cut), timestamp: Date.now() });
     }
-    const chosen = tries.reduce((a, b) => bytes(a.line) <= bytes(b.line) ? a : b);
-    return chosen.line;
+    return tries.reduce((a, b) => bytes(a) <= bytes(b) ? a : b);
   };
 }
 

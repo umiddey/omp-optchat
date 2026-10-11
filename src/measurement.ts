@@ -14,19 +14,15 @@ import { record, splitView } from './cache.ts';
 export const MEASURE_DIR_ENV = 'OMP_OPTCHAT_MEASURE_DIR';
 export const measureFiles = (directory: string) => ({ usage: join(directory, 'usage.jsonl'), composition: join(directory, 'request-composition.jsonl') });
 
-/** One background provider invocation: a summary compaction attempt or an orders task call. */
+/** One background summary-compaction provider invocation. */
 export interface InvokeMeta {
-  purpose: 'summary' | 'backfill' | 'migrate' | 'consolidate';
+  purpose: 'summary';
   provider: string;
   model: string;
-  /** 1-based index of the provider call within one compressor invocation (summary retries count up); orders calls are 1. */
+  /** 1-based index of the provider call within one compressor invocation (summary retries count up). */
   attempt: number;
   /** The summary node this call builds. */
   part?: { l: number; i: number };
-  /** Unscanned message ids whose orders this summary also reads. */
-  scan?: readonly number[];
-  /** True when the orders task re-asks with the wording-loss note (which is never logged: it quotes order wording). */
-  retry?: true;
 }
 /** How one invocation ended. `usage` is the actual pi-ai usage when the provider reported one, undefined otherwise. */
 export interface SettledMeta { status: 'ok' | 'error' | 'aborted' | 'thrown'; usage?: unknown; error?: string }
@@ -57,7 +53,8 @@ export interface UsageRow {
   type: 'background-start' | 'background';
   id: string;
   timestamp: string;
-  purpose: InvokeMeta['purpose'];
+  /** Historical files also contain calls made by the removed ledger subsystem. */
+  purpose: 'summary' | 'backfill' | 'migrate' | 'consolidate';
   provider: string;
   model: string;
   attempt: number;
@@ -242,8 +239,6 @@ export function openMeasurement(directory: string, warn: (s: string) => void = c
       const shared = {
         id, purpose: meta.purpose, provider: meta.provider, model: meta.model, attempt: meta.attempt,
         ...(meta.part && { part: meta.part }),
-        ...(meta.scan && { scan: [...meta.scan] }),
-        ...(meta.retry && { retry: true as const }),
       };
       const started = performance.now();
       usage.append({ schema: 1, type: 'background-start', timestamp: new Date().toISOString(), ...shared });
