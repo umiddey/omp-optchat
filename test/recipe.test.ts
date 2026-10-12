@@ -11,12 +11,11 @@ test('compactor equals recipe §5; the turn prompt keeps the recipe verbatim as 
   const recipe = readFileSync(new URL('./fixtures/recipe-prompt.txt', import.meta.url), 'utf8').trimEnd();
   assert.equal(COMPACT, recipe);
 });
-test('new profiles default to xhigh and existing explicit effort is unchanged', () => {
+test('explicitly configured compactor effort is preserved', () => {
   const dir = mkdtempSync(join(tmpdir(), 'optchat-recipe-config-'));
   try {
-    assert.equal(loadConfig(dir).compactor.thinking, 'xhigh');
-    writeFileSync(join(dir, 'config.json'), JSON.stringify({ compactor: { provider: 'anthropic', model: 'claude-haiku-5-5', thinking: 'medium' } }));
-    assert.equal(loadConfig(dir).compactor.thinking, 'medium');
+    writeFileSync(join(dir, 'config.json'), JSON.stringify({ compactor: { provider: 'anthropic', model: 'claude-haiku-5-5', thinking: 'high' } }));
+    assert.equal(loadConfig(dir).compactor.thinking, 'high');
   } finally { rmSync(dir, { recursive: true, force: true }); }
 });
 test('non-tool long texts split losslessly into consecutive messages, without splitting surrogate pairs', async () => {

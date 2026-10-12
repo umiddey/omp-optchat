@@ -68,14 +68,32 @@ Or keep plain `omp` as it is and add a short command for the memory one: `alias 
 - Before a turn starts, the previous turn's messages are summarized; that usually takes a few seconds and shows as
   "Waiting for OptChat summaries…".
 
-Summarizer model (default `anthropic/claude-haiku-5-5`, xhigh effort for new profiles): edit
+Summarizer (default `anthropic/claude-haiku-5-5`, medium effort for new profiles) with provider failover: edit
 `~/.omp/optchat/<profile>/config.json`:
 
 ```json
-{ "compactor": { "provider": "anthropic", "model": "claude-haiku-5-5", "thinking": "xhigh" }, "runLimit": 256000, "memories": false }
+{ "compactor": { "provider": "anthropic", "model": "claude-haiku-5-5", "thinking": "medium" },
+  "compactorFallbacks": [
+    { "provider": "zai", "model": "glm-5.3-flash", "thinking": "high" },
+    { "provider": "google-antigravity", "model": "gemini-3.8-flash", "thinking": "medium" },
+    { "provider": "cursor", "model": "claude-haiku-5-5", "thinking": "medium" } ],
+  "runLimit": 256000, "memories": false }
 ```
 
-Existing profile configs keep their explicit effort. New prompts affect only newly built nodes; existing tree nodes are never rebuilt.
+Existing profile configs keep their explicit compactor and effort. Profiles without `compactorFallbacks` inherit the
+default chain above; `"compactorFallbacks": []` turns failover off. Entries use the same effort strings as the
+primary, and an effort a provider does not support is rejected (GLM takes low/high/max, hence high here).
+
+Failover covers provider quota exhaustion and outages only — never content or size reasons — and the main chat model
+is never affected. Fallbacks are tried in listed order after the primary. A blocked provider sits out a cooldown that
+honors the provider's retry hint (ZAI quota reset times are Beijing time, UTC+8); cooldowns are process-local and
+clear when the OMP process restarts; plain outages cool down briefly, unknown quota errors conservatively. A fallback
+without configured credentials is skipped with a warning. If every provider is blocked, summaries stay pending and are
+retried later — a summary is never fabricated. `usage.jsonl` records the provider actually used for each attempt.
+Prompt caches warm separately per provider: the first request after a switch pays the new provider's own cache write.
+Configuration is read at startup: restart the OMP session to apply changes.
+
+New prompts affect only newly built nodes; existing tree nodes are never rebuilt.
 
 `runLimit` is a positive integer UTF-8 byte limit for the raw run tail (default 256000, about 64k tokens); long runs refresh their memory view at the latest assistant boundary while retaining the current task (the newest message you typed into the run, else its first message) and intact assistant/tool-result tail.
 
@@ -156,7 +174,9 @@ bun scripts/grouping-experiment.ts --home /tmp/optchat-grouping-new \
   --compactor anthropic/claude-haiku-5-5 --thinking medium
 ```
 
-Use fresh output paths. Matched runs check factual recall, reply compliance (ORCHID in every reply) and a filesystem
+Use fresh output paths. Benchmarks and the grouping experiment run exactly the explicitly named single provider —
+they are never given fallback options — so a matched comparison cannot hide a model switch behind failover.
+Matched runs check factual recall, reply compliance (ORCHID in every reply) and a filesystem
 artifact; an OptChat-only zoom probe runs separately and is excluded from comparative totals.
 `--repetitions N` repeats independent runs; `--workload long --turns N` adds long-context pressure, and
 `--compaction-threshold TOKENS` forces native OMP compaction at the same threshold in both modes.

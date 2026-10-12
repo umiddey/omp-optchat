@@ -99,6 +99,30 @@ test('runLimit config loads, defaults for existing profiles, and rejects invalid
     for (const runLimit of [0, -1, 1.5, '6000', null, 9007199254740992]) { writeFileSync(join(dir, 'config.json'), JSON.stringify({ ...defaults, runLimit })); expect(() => loadConfig(dir)).toThrow(/Invalid runLimit configuration/); }
   } finally { rmSync(dir, { recursive: true, force: true }); }
 });
+test('compactorFallbacks: custom primary kept, absent inherits defaults, [] disables, invalid rejected', () => {
+  const dir = mkdtempSync(join(tmpdir(), 'optchat-fallbacks-config-'));
+  try {
+    // An explicitly configured primary is preserved untouched; a missing compactorFallbacks field inherits the defaults.
+    const custom = { compactor: { provider: 'zai', model: 'glm-5.3-flash', thinking: 'low' } };
+    writeFileSync(join(dir, 'config.json'), JSON.stringify(custom));
+    const inherited = loadConfig(dir);
+    expect(inherited.compactor).toEqual(custom.compactor);
+    expect(inherited.compactorFallbacks).toEqual(defaults.compactorFallbacks);
+    expect(inherited.compactorFallbacks.length).toBeGreaterThan(0);
+    // An explicit empty array disables failover; explicit entries pass through.
+    writeFileSync(join(dir, 'config.json'), JSON.stringify({ ...defaults, compactorFallbacks: [] }));
+    expect(loadConfig(dir)).toHaveProperty('compactorFallbacks', []);
+    const explicit = [{ provider: 'google-antigravity', model: 'gemini-3.8-flash', thinking: 'low' }];
+    writeFileSync(join(dir, 'config.json'), JSON.stringify({ ...defaults, compactorFallbacks: explicit }));
+    expect(loadConfig(dir)).toHaveProperty('compactorFallbacks', explicit);
+    // Malformed arrays/entries and non-whitelist efforts are rejected, same whitelist as the primary compactor.
+    for (const fallbacks of ['nope', 42, [null], ['x'], [{ provider: 'zai' }], [{ provider: 'zai', model: 'm' }],
+      [{ provider: 'zai', model: 'm', thinking: 'ultra' }], [{ model: 'm', thinking: 'high' }]]) {
+      writeFileSync(join(dir, 'config.json'), JSON.stringify({ ...defaults, compactorFallbacks: fallbacks }));
+      expect(() => loadConfig(dir)).toThrow(/Invalid compactorFallbacks configuration/);
+    }
+  } finally { rmSync(dir, { recursive: true, force: true }); }
+});
 
 test('raw byte accounting includes UTF-8, thinking, tool names/JSON arguments, results and custom content', () => {
   const talk = assistant(2, 'é');

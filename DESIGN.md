@@ -31,9 +31,12 @@ their results are logged like any tool result.
 - One process per profile (recipe §1 "one process owns a chat"): lock with PID + liveness check (port
   pi-optchat `profiles.ts` lock logic, simplified). A second OMP on a held profile: TUI → notify error and
   refuse input (`input` handler returns handled); print/rpc → throw. No silent fallback to plain OMP.
-- `config.json`: `{ "compactor": { "provider": "anthropic", "model": "claude-haiku-5-5", "thinking": "xhigh" }, "runLimit": 256000 }`
-  defaults; editable by hand. Missing `runLimit` uses 256000; invalid/nonpositive/noninteger values fail clearly.
-  Existing profile configs retain their explicit effort; only new profiles default to xhigh.
+- `config.json`: `{ "compactor": { "provider": "anthropic", "model": "claude-haiku-5-5", "thinking": "medium" },
+  "compactorFallbacks": [ … ], "runLimit": 256000 }` defaults; editable by hand. Missing `runLimit` uses 256000;
+  invalid/nonpositive/noninteger values fail clearly. Existing profile configs retain their explicit compactor and
+  effort; only new profiles default to medium. Missing `compactorFallbacks` inherits the default chain
+  (`zai/glm-5.3-flash` high → `google-antigravity/gemini-3.8-flash` medium → `cursor/claude-haiku-5-5` medium);
+  an explicit `[]` disables failover; a malformed array or entry (same effort whitelist as the primary) fails clearly.
 
 ### Recipe conformance and deliberate operational deviations
 
@@ -68,6 +71,23 @@ The same accounting applies to the 64 KB low bound and 16–32 KB compaction vie
 The recipe's node records store `size`, but its prose is ambiguous about framing.
 We deliberately keep existing accounting: framing is a few percent and changing it
 would rewrite an existing profile's view and invalidate its cache continuity.
+
+### Compactor provider failover
+
+`compactorFallbacks` lists summarizer providers tried in order after the primary when the primary cannot serve:
+provider quota exhaustion and outages only. Content or size reasons never switch providers (a too-long retry reruns
+the same model), and the main chat model is never affected. Each blocked provider enters a cooldown keyed by
+provider, process-local (clearing when the OMP process restarts): a `retry-after` hint is honored, ZAI's
+"limit will reset at …" timestamps are Beijing time (UTC+8), plain outages cool down briefly, and quota errors of
+unknown shape cool down conservatively. A fallback without configured credentials is skipped with a warning
+(compressor `warn` callback → `ctx.ui.notify(text, "warning")`); an effort a provider does not support is rejected
+by OMP when resolving the model (GLM accepts low/high/max, hence high in the default chain). When every provider is
+blocked the compaction stays pending on the existing retry schedule — unbuilt lines keep the recipe
+`(not summarized yet: zoom it)` state; a summary is never fabricated. Instrumentation and `usage.jsonl` record the
+provider actually used for each attempt. Prompt caches warm separately per provider: after a switch, the first
+request on the new provider pays its own cache write. Configuration is startup-read: changes apply after the next
+session start. `scripts/bench.ts` and `scripts/grouping-experiment.ts` deliberately run the explicitly named single
+provider (no options), so matched comparisons cannot hide a model switch behind failover.
 
 
 ## Turn integration (OMP hooks)

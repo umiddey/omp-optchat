@@ -105,7 +105,8 @@ export default function optchat(pi: ExtensionAPI) {
       // The span source is the sink itself, not the `measurement` slot: a straggling background call at shutdown
       // must settle into the (closed, appendable-again) files instead of dereferencing a cleared variable.
       const instrument: Instrumentation = meta => telemetry.invoke(meta);
-      memory = await Memory.open(dir, createCompressor(ctx.modelRegistry, () => config.compactor, undefined, undefined, instrument), text => ctx.ui.notify(text, 'warning'), undefined, undefined);
+      memory = await Memory.open(dir, createCompressor(ctx.modelRegistry, () => config.compactor, undefined, undefined, instrument,
+        { fallbacks: () => config.compactorFallbacks, warn: text => ctx.ui.notify(text, 'warning') }), text => ctx.ui.notify(text, 'warning'), undefined, undefined);
       agents = new AgentIndex(dir, text => ctx.ui.notify(text, 'warning'), () => ctx.sessionManager.getSessionFile());
       const setting = lookup('compaction.enabled');
       if (!setting) throw new Error('OMP compaction.enabled setting unavailable.');
