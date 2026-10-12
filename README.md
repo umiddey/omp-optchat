@@ -24,7 +24,7 @@ Or straight from GitHub: `omp plugin install github:umiddey/omp-optchat`.
 
 Update: `omp plugin upgrade omp-optchat`. Remove: `omp plugin uninstall omp-optchat`.
 
-Tested with OMP 18.8.3. Needs an Anthropic login (`/login`) for the summarizer model.
+Tested with OMP 18.8.3. Log into at least one configured compactor provider (`/login`).
 
 ## Use
 
