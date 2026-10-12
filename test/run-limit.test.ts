@@ -3,7 +3,7 @@ import { mkdtempSync, mkdirSync, writeFileSync, rmSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { z, Settings, type ExtensionAPI, type ExtensionContext } from '@oh-my-pi/pi-coding-agent';
-import type { AgentMessage } from '@oh-my-pi/pi-agent-core';
+import { ThinkingLevel, type AgentMessage } from '@oh-my-pi/pi-agent-core';
 import optchat from '../src/index.ts';
 import { defaults, loadConfig } from '../src/config.ts';
 import { projectContext, rawBytes } from '../src/integration.ts';
@@ -103,7 +103,7 @@ test('compactorFallbacks: custom primary kept, absent inherits defaults, [] disa
   const dir = mkdtempSync(join(tmpdir(), 'optchat-fallbacks-config-'));
   try {
     // An explicitly configured primary is preserved untouched; a missing compactorFallbacks field inherits the defaults.
-    const custom = { compactor: { provider: 'zai', model: 'glm-5.3-flash', thinking: 'low' } };
+    const custom = { compactor: { provider: 'zai', model: 'glm-5.3-flash', thinking: ThinkingLevel.Low } };
     writeFileSync(join(dir, 'config.json'), JSON.stringify(custom));
     const inherited = loadConfig(dir);
     expect(inherited.compactor).toEqual(custom.compactor);

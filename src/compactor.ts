@@ -87,6 +87,7 @@ export function createCompressor(registry: ModelRegistry, choice: () => ModelCho
   onUsage: (message: AssistantMessage) => void = () => {}, accepted = () => NODE,
   instrument?: Instrumentation, options?: CompressorOptions): Compressor {
   const gate = primeFirst();
+  const sharedAvailability = providerAvailability();
   return async (input, signal) => {
     const chain: ModelChoice[] = [];
     const seen = new Set<string>();
@@ -95,7 +96,7 @@ export function createCompressor(registry: ModelRegistry, choice: () => ModelCho
       if (!seen.has(key)) { seen.add(key); chain.push(candidate); }
     }
     // Without fallback candidates the compressor keeps its single-provider contract: raw failures, no cooldowns, no probes.
-    const availability = chain.length > 1 ? providerAvailability() : undefined;
+    const availability = chain.length > 1 ? sharedAvailability : undefined;
     const warn = options?.warn;
     const step = compaction(input);
     const view = splitView(input.context);
@@ -103,11 +104,18 @@ export function createCompressor(registry: ModelRegistry, choice: () => ModelCho
     let attempt = 0;
     outer: for (let c = 0; c < chain.length; c++) {
       const selected = chain[c];
+      signal.throwIfAborted();
+      const cooled = availability?.cooled(selected.provider);
+      if (cooled !== undefined) {
+        setbacks.push({ name: `${selected.provider}/${selected.model}`, label: 'cooling down', until: cooled });
+        continue;
+      }
       const name = `${selected.provider}/${selected.model}`;
       const model = registry.find(selected.provider, selected.model);
       if (!model) {
         if (!availability) throw new Error(`Compactor model unavailable: ${name}. Edit the profile config.json.`);
-        setbacks.push({ name, label: `model ${selected.model} not in registry` });
+        const until = availability.cool(selected.provider, classifyFailure(selected.provider, 401, '').cooldownMs!);
+        setbacks.push({ name, label: `model ${selected.model} not in registry`, until });
         warnFallback(warn, chain, c, 'is not in the model registry');
         continue;
       }
@@ -117,14 +125,15 @@ export function createCompressor(registry: ModelRegistry, choice: () => ModelCho
       // thinking never reach the next one.
       const messages: Message[] = [{ role: 'user', content: [{ type: 'text', text: input.context }, { type: 'text', text: step }], timestamp: Date.now() }];
       const tries: string[] = [];
-      while (attempt < 5) {
+      let sizeAttempt = 0;
+      while (sizeAttempt < 5) {
         // One probe at a time into a provider of unknown availability; followers wait cancelably and re-evaluate.
         let release: (outcome?: 'up' | 'down') => void = () => {};
         try {
           if (availability) {
             const claim = availability.claim(selected.provider);
             if (claim.kind === 'cooled') { setbacks.push({ name, label: 'cooling down', until: claim.until }); continue outer; }
-            if (claim.kind === 'wait') { await waitCancelable(claim.done, signal); continue outer; }
+            if (claim.kind === 'wait') { await waitCancelable(claim.done, signal); c = -1; continue outer; }
             if (claim.kind === 'probe') release = claim.release;
           }
           const warmed = prefix ? await gate(prefix, signal) : () => {};
@@ -136,15 +145,24 @@ export function createCompressor(registry: ModelRegistry, choice: () => ModelCho
           let reply: AssistantMessage;
           try {
             let apiKey: string;
-            try { apiKey = await registry.getApiKey(model); }
-            catch (error) {
-              span.settled(failure(error, signal));
+            try {
+              const key = await registry.getApiKey(model);
+              if (!key) throw new Error('Provider credential unavailable.');
+              apiKey = key;
+            } catch (error) {
               if (signal.aborted || !availability) throw error;
-              setbacks.push({ name, label: 'credential unavailable' });
-              release();
-              warnFallback(warn, chain, c, 'credential unavailable');
+              const message = error instanceof Error ? error.message : String(error);
+              const lane = classifyFailure(selected.provider, thrownStatus(error), message);
+              if (!lane.fallback && !/api.?key|credential|authentication|not logged|oauth|access token/i.test(message)) throw error;
+              span.settled(failure(error, signal));
+              const label = lane.fallback ? lane.label : 'credential unavailable';
+              const until = availability.cool(selected.provider, lane.cooldownMs ?? classifyFailure(selected.provider, 401, '').cooldownMs!);
+              setbacks.push({ name, label, until });
+              release('down');
+              warnFallback(warn, chain, c, `${label} until ${new Date(until).toISOString()}`);
               continue outer;
             }
+            sizeAttempt++;
             const stream = streamSimple(model, { systemPrompt: [COMPACT], messages }, {
               // A shared session id is the OpenAI prompt-cache key; SSE because over a websocket Codex would chain unrelated parallel calls on one cached connection.
               apiKey, sessionId: 'optchat-compactor',
@@ -157,9 +175,17 @@ export function createCompressor(registry: ModelRegistry, choice: () => ModelCho
               },
             });
             // The cache entry is usable once the model starts answering.
-            for await (const event of stream) if (event.type !== 'start') { warmed(event.type !== 'error'); break; }
+            for await (const event of stream) if (event.type !== 'start') {
+              if (event.type !== 'error') warmed(true);
+              break;
+            }
             reply = await stream.result();
             span.settled(outcome(reply));
+            // Record a failed primer's cooldown BEFORE releasing its prefix waiters in finally.
+            if (availability && !signal.aborted && reply.stopReason === 'error') {
+              const lane = classifyFailure(selected.provider, reply.errorStatus, reply.errorMessage ?? '');
+              if (lane.fallback) availability.cool(selected.provider, lane.cooldownMs ?? 0);
+            }
           } catch (error) {
             span.settled(failure(error, signal));
             // An aborted signal is the caller's cancellation: always exit, never fall back.
@@ -178,7 +204,7 @@ export function createCompressor(registry: ModelRegistry, choice: () => ModelCho
             if (!availability) throw new Error(reply.errorMessage ?? `Compactor error`);
             const lane = classifyFailure(selected.provider, reply.errorStatus, reply.errorMessage ?? '');
             if (!lane.fallback) { release('up'); throw new Error(reply.errorMessage ?? `Compactor error`); }
-            const until = availability.cool(selected.provider, lane.cooldownMs ?? 0);
+            const until = availability.cooled(selected.provider) ?? availability.cool(selected.provider, lane.cooldownMs ?? 0);
             setbacks.push({ name, label: lane.label, until });
             release('down');
             warnFallback(warn, chain, c, `${lane.label} until ${new Date(until).toISOString()}`);

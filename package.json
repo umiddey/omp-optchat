@@ -1,6 +1,6 @@
 {
   "name": "omp-optchat",
-  "version": "0.2.9",
+  "version": "0.2.10",
   "description": "Never-ending chat memory (Victor Taelin's OptChat) for oh-my-pi, built to keep prompt caches hot",
   "keywords": [
     "omp",

@@ -422,7 +422,7 @@ async function runOnce(args: Args, workload: Workload, mode: 'native' | 'optchat
   mkdirSync(profile, { recursive: true, mode: 0o700 });
   // The profile config is fixed before launch so the extension loads exactly the benchmark compactor.
   writeFileSync(join(profile, 'config.json'), JSON.stringify({
-    compactor: args.compactor, ...(args.runLimit !== undefined ? { runLimit: args.runLimit } : {}),
+    compactor: args.compactor, compactorFallbacks: [], ...(args.runLimit !== undefined ? { runLimit: args.runLimit } : {}),
   }, null, 2) + '\n');
 
   const startedAt = new Date().toISOString();

@@ -5,7 +5,7 @@ import {
   type RateLimitReason,
 } from '@oh-my-pi/pi-ai';
 import { retryResetTimezoneOffsetFor } from '@oh-my-pi/pi-catalog/compat/behavior';
-import { extractRetryHint } from '@oh-my-pi/pi-utils';
+import { extractRetryHint } from '@oh-my-pi/pi-utils/fetch-retry';
 
 /** Compactor failover: how one provider failure classifies into a fallback or a terminal lane, and the process-local
  * availability memory that lets concurrent compressions skip a provider that just failed instead of hammering it.
@@ -30,7 +30,10 @@ const NETWORK_FAILURE_PATTERN =
  * field, an absolute reset stamp (ZAI's read as Beijing wall clock, offset declared by the catalog, never the host
  * zone) — so a cooldown ends exactly when the provider said, never on our guess. */
 export function retryHintMs(provider: string, message: string): number | undefined {
-  return extractRetryHint(undefined, message, { naiveResetTimezoneOffset: retryResetTimezoneOffsetFor(provider) });
+  // Google can supply the absolute reset only in structured metadata, without RetryInfo.
+  const reset = message.match(/"quotaResetTimeStamp"\s*:\s*"([^"]+)"/i);
+  const body = reset ? `${message}\nreset at ${reset[1]}` : message;
+  return extractRetryHint(undefined, body, { naiveResetTimezoneOffset: retryResetTimezoneOffsetFor(provider) });
 }
 
 /** One classified provider failure. `fallback` lanes move the compression to the next candidate and cool the provider
@@ -149,7 +152,8 @@ export function providerAvailability(): ProviderAvailability {
 /** Await `pending`, but leave at once — without keeping a listener — when `signal` aborts. */
 export async function waitCancelable(pending: Promise<void>, signal: AbortSignal): Promise<void> {
   signal.throwIfAborted();
-  const { promise: aborted, resolve: wake } = Promise.withResolvers<void>();
+  const { promise: aborted, resolve } = Promise.withResolvers<void>();
+  const wake = () => resolve();
   signal.addEventListener('abort', wake, { once: true });
   try { await Promise.race([pending, aborted]); } finally { signal.removeEventListener('abort', wake); }
   signal.throwIfAborted();

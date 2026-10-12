@@ -33,8 +33,8 @@ const reply = (model: ai.Model<ai.Api>, text: string, over: Partial<ai.Assistant
   ({ role: 'assistant', content: [{ type: 'text', text }], api: model.api, provider: model.provider, model: model.id, timestamp: 0, stopReason: 'stop', usage, ...over });
 const input = { context: '<chat>\n</chat>', source: 'user: ' + 'valuable '.repeat(100), part: { l: 0, i: 40 } };
 const primary = () => ({ provider: 'anthropic', model: 'claude-haiku-5-5', thinking: 'off' as const });
-const zaiChoice = { provider: 'zai', model: 'glm-5.3-flash', thinking: 'high' as const };
-const googleChoice = { provider: 'google-antigravity', model: 'gemini-3.8-flash', thinking: 'medium' as const };
+const zaiChoice = { provider: 'zai', model: 'glm-5.3-flash', thinking: ai.Effort.High };
+const googleChoice = { provider: 'google-antigravity', model: 'gemini-3.8-flash', thinking: ai.Effort.Medium };
 const httpError = (status: number, message: string): Error => Object.assign(new Error(message), { status });
 /** Drains the microtask queue deterministically: two hops let a started call reach its first real suspension point. */
 const settle = () => {
@@ -157,6 +157,36 @@ test('concurrent compressions send one probe to a failing primary; followers re-
   assert.equal(calls.filter(c => c === 'zai/glm-5.3-flash').length, 3);
 });
 
+test('followers of a successful availability probe stay on the primary', async () => {
+  const calls: string[] = [];
+  let finish = () => {};
+  streaming = model => {
+    calls.push(model.provider);
+    if (calls.length > 1) return okStream(model);
+    return heldStream(model, (stream, held) => {
+      finish = () => { stream.push({ type: 'done', reason: 'stop', message: reply(held, 'user: kept') }); stream.end(); };
+    });
+  };
+  const compress = createCompressor(registry, primary, undefined, undefined, undefined, { fallbacks: () => [zaiChoice] });
+  const runs = [compress(input, new AbortController().signal), compress(input, new AbortController().signal)];
+  await settle();
+  assert.deepEqual(calls, ['anthropic']);
+  finish();
+  assert.deepEqual(await Promise.all(runs), ['user: kept', 'user: kept']);
+  assert.deepEqual(calls, ['anthropic', 'anthropic']);
+});
+
+test('a fallback gets its own full five-attempt size budget after an unavailable primary', async () => {
+  let fallbackCalls = 0;
+  streaming = model => {
+    if (model.provider === 'anthropic') return errorStream(model, 429, 'rate limited');
+    return okStream(model, 'x'.repeat(++fallbackCalls === 5 ? 100 : 700));
+  };
+  const compress = createCompressor(registry, primary, undefined, undefined, undefined, { fallbacks: () => [zaiChoice] });
+  assert.equal(await compress(input, new AbortController().signal), 'x'.repeat(100));
+  assert.equal(fallbackCalls, 5);
+});
+
 test('cancellation exits at once and never falls back', async () => {
   const calls: string[] = [];
   streaming = (model, _context, options) => { calls.push(`${model.provider}/${model.id}`);
@@ -250,6 +280,7 @@ test('a real Google quota reset (RetryInfo retryDelay / quotaResetTimeStamp) set
     const lane = classifyFailure('google-antigravity', 429, quotaMessage);
     assert.equal(lane.fallback, true);
     assert.ok(Math.abs((lane.cooldownMs ?? 0) - 114_167_020.171488) < 1);
+    assert.equal(retryHintMs('google-antigravity', JSON.stringify({ metadata: { quotaResetTimeStamp: '2026-10-13T19:48:00Z' } })), 114_167_000);
     const calls: string[] = [];
     streaming = model => { calls.push(`${model.provider}/${model.id}`);
       if (model.provider === 'anthropic') return errorStream(model, 429, 'usage limit reached');
@@ -271,6 +302,7 @@ test('a warm provider runs parallel calls; a failure while a peer waits on the p
   const controllers: (() => void)[] = [];
   streaming = model => { calls.push(`${model.provider}/${model.id}`);
     if (model.provider !== 'anthropic') return okStream(model, 'summary');
+    if (calls.length === 1) return okStream(model, 'summary');
     return heldStream(model, (stream, held) => { controllers.push(() => {
       stream.push({ type: 'error', reason: 'error', error: reply(held, '', { stopReason: 'error', errorMessage: 'account rate limit', errorStatus: 429 }) });
       stream.end();
