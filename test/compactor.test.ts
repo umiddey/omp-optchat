@@ -17,8 +17,12 @@ const reply = (text: string): ai.AssistantMessage => ({ role: 'assistant', conte
 const compressor = () => createCompressor(registry, () => ({ provider: 'fixture', model: 'fixture', thinking: 'off' }));
 const input = { context: '<chat>\n</chat>', source: 'user: ' + 'valuable '.repeat(100), part: { l: 0, i: 40 } };
 test('recipe ruler, merge ranges and Too long retry; shortest of at most five replies', async () => {
-  assert.equal(compaction({ source: 'user: hi', part: { l: 0, i: 40 } }), `Compaction: compress message 40 into one line of at most 512 bytes\n(about 70 words), the length of this ruler:\n${'-'.repeat(NODE)}\n<input>\nuser: hi\n</input>`);
-  assert.match(compaction({ source: 'a\nb', part: { l: 3, i: 5 } }), /merge lines 40\+4 and 44\+4/);
+  const leaf = compaction({ source: 'user: hi', part: { l: 0, i: 40 } });
+  assert.ok(leaf.startsWith(`Compaction: compress message 40 into one line of at most 512 bytes\n(about 70 words), the length of this ruler:\n${'-'.repeat(NODE)}\n<input>\nuser: hi\n</input>\nStanding rules live in the context files`));
+  const merge = compaction({ source: 'a\nb', part: { l: 3, i: 5 } });
+  assert.match(merge, /merge lines 40\+4 and 44\+4/);
+  // Both task shapes forbid carrying standing rules over from <chat>; COMPACT (shared cache prefix) stays the recipe.
+  for (const task of [leaf, merge]) assert.match(task, /Never carry rules, rule restatements or\nstatus boilerplate/);
   let calls = 0;
   const contexts: ai.Context[] = [];
   streaming = (_model, context, options) => {

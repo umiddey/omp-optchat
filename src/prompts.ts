@@ -89,8 +89,16 @@ told the line is too long, shorten it. Non-ASCII characters cost 2-4 bytes.`;
 // ruler; a real sample line once got its content copied, so it is dashes.
 const RULER = '-'.repeat(NODE);
 const label = (part: Part) => `${start(part)}+${2 ** part.l}`;
+// Not part of the recipe: lines kept re-copying standing rules and status lists from <chat>, so 62 of 142 view
+// lines repeated one stale rule as binding after the user had revoked it. COMPACT stays verbatim (shared cache prefix).
+const STANDING = `Standing rules live in the context files OptChat reads every turn (AGENTS.md and
+the like). Write a rule only in the line whose <input> has the user stating,
+changing or revoking it, with its date. Never carry rules, rule restatements or
+status boilerplate (pending/unpushed/breach lists) over from <chat> or from the
+lines you merge: keep only what <input>'s own messages say and did. A later user
+word overrides an earlier one; never present the older one as binding.`;
 export function compaction({ source, part }: { source: string; part: Part }) {
-  return compactionTask(source, part);
+  return `${compactionTask(source, part)}\n${STANDING}`;
 }
 function compactionTask(source: string, part: Part) {
   if (!part.l) return `Compaction: compress message ${part.i} into one line of at most 512 bytes
